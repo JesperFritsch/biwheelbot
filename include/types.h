@@ -14,6 +14,6 @@ struct WheelState {
 
 
 struct WheelStates {
-    WheelState left;
-    WheelState right;
+    WheelState a;
+    WheelState b;
 };

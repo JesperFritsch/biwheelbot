@@ -1,6 +1,7 @@
 
 #include "sensor.h"
 #include "types.h"
+#include "nrf.h"
 #include <Wire.h>
 #include <Arduino_LSM9DS1.h>
 #include "Arduino.h"
@@ -12,9 +13,17 @@
 #define PIN_ENCODER_B1 3
 #define PIN_ENCODER_B2 4
 
+#define NRF_PIN_ENCODER_A1 14
+#define NRF_PIN_ENCODER_A2 13
+#define NRF_PIN_ENCODER_B1 12
+#define NRF_PIN_ENCODER_B2 15
+
+#define BATT_V_PIN A0
 
 #define GYRO_CALIB_SAMPLES 128
 #define SPEED_TICK_TIMEOUT_US 100000
+
+constexpr float V_BATT_SCALE = 0.003429327f;
 
 constexpr float GYRO_STDDEV = 0.17f; // standard deviation threshold, if lower than this then the bot is completely still.
 constexpr float COMP_BALANCE = 0.95f; // What balance to use in the complimentary filter
@@ -34,6 +43,7 @@ static volatile int32_t motor_a = 0, motor_b = 0;
 static volatile float motor_a_speed_mms = 0, motor_b_speed_mms = 0;
 static volatile uint8_t prev_state_a = 0, prev_state_b = 0;
 static volatile uint32_t last_tick_a = 0, last_tick_b = 0; 
+static volatile uint32_t miss_count = 0;
 
 Vec3 gyro_cal{};
 
@@ -42,6 +52,10 @@ void encode_b();
 
 
 WheelStates sensor_wheels() {
+
+    Serial.print("Miss count: ");
+    Serial.println(miss_count);
+
     uint32_t current_us = micros();
     float speed_a = current_us - last_tick_a > SPEED_TICK_TIMEOUT_US ? 0 : motor_a_speed_mms;
     float speed_b = current_us - last_tick_b > SPEED_TICK_TIMEOUT_US ? 0 : motor_b_speed_mms;
@@ -76,6 +90,11 @@ int init_imu() {
 }
 
 
+void init_adc() {
+    analogReadResolution(12);
+}
+
+
 void init_encoders() {
 
     pinMode(PIN_ENCODER_A1, INPUT_PULLUP);
@@ -88,6 +107,15 @@ void init_encoders() {
     attachInterrupt(digitalPinToInterrupt(PIN_ENCODER_A2), encode_a, CHANGE);
     attachInterrupt(digitalPinToInterrupt(PIN_ENCODER_B1), encode_b, CHANGE);
     attachInterrupt(digitalPinToInterrupt(PIN_ENCODER_B2), encode_b, CHANGE);
+}
+
+
+float sensor_read_battery() {
+    uint64_t sum = 0;
+    for (int i = 0; i < 16; i++) {
+        sum += analogRead(BATT_V_PIN);
+    }
+    return (sum / 16.0f) * V_BATT_SCALE;
 }
 
 
@@ -165,6 +193,10 @@ int sensor_calibrate_gyro() {
         float mean = sum[i] / GYRO_CALIB_SAMPLES;
         float variance = sumsq[i] / GYRO_CALIB_SAMPLES - mean * mean;
         float stddev = sqrtf(variance);
+        Serial.print("value ");
+        Serial.print(i);
+        Serial.print(" ");
+        Serial.println(stddev);
         if (stddev >= GYRO_STDDEV) {
             return -1;
         }
@@ -179,10 +211,16 @@ int sensor_calibrate_gyro() {
 
 void encode_a() {
     uint32_t current = micros();
-    uint32_t delta_us = current - last_tick_a;
-    uint8_t s = (digitalRead(PIN_ENCODER_A1) << 1) | digitalRead(PIN_ENCODER_A2);
+    uint32_t delta_us = (current - last_tick_a) + 1;
+    uint32_t in = NRF_P1->IN;
+    uint8_t s = (((in >> NRF_PIN_ENCODER_A1) & 1) << 1) | ((in >> NRF_PIN_ENCODER_A2) & 1);
     int8_t decoded = DECODE_TABLE[(prev_state_a << 2) | s]; // subtract to get both encoders to count the same direction
-    motor_a_speed_mms = decoded * (MM_PER_COUNT * 1000000 / delta_us);
+    if (decoded) {
+        motor_a_speed_mms = decoded * (MM_PER_COUNT * 1000000 / delta_us);
+    }
+    else {
+        miss_count++;
+    }
     motor_a += decoded;
     prev_state_a = s;
     last_tick_a = current;
@@ -191,10 +229,16 @@ void encode_a() {
 
 void encode_b() {
     uint32_t current = micros();
-    uint32_t delta_us = current - last_tick_b;
-    uint8_t s = (digitalRead(PIN_ENCODER_B1) << 1) | digitalRead(PIN_ENCODER_B2);
+    uint32_t delta_us = (current - last_tick_b) + 1;
+    uint32_t in = NRF_P1->IN;
+    uint8_t s = (((in >> NRF_PIN_ENCODER_B1) & 1) << 1) | ((in >> NRF_PIN_ENCODER_B2) & 1);
     int8_t decoded = DECODE_TABLE[(prev_state_b << 2) | s];
-    motor_b_speed_mms = decoded * (MM_PER_COUNT * 1000000.f / delta_us);
+    if (decoded) {
+        motor_b_speed_mms = decoded * (MM_PER_COUNT * 1000000.f / delta_us);
+    }
+    else {
+        miss_count++;
+    }
     motor_b += decoded;
     prev_state_b = s;
     last_tick_b = current;
