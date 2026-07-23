@@ -1,48 +1,40 @@
-#include <ArduinoBLE.h>
 #include "Arduino.h"
+#include <Arduino_LSM9DS1.h>
 
-// Custom service + characteristic for movement commands
-BLEService cmdService("19b10000-e8f2-537e-4f6c-d104768a1214");
-// 4 bytes: [linear_vel_i8, angular_vel_i8, flags_u8, seq_u8]
-BLECharacteristic cmdChar("19b10001-e8f2-537e-4f6c-d104768a1214",
-                          BLEWrite | BLEWriteWithoutResponse, 4);
-
-struct Target { int8_t linear; int8_t angular; uint8_t flags; uint8_t seq; };
-Target target = {0, 0, 0, 0};
-uint32_t lastCmdMs = 0;
-#define DEVICE_NAME "BiWheelBot" 
-char rec_buff[200];
-
-void onCmdWritten(BLEDevice central, BLECharacteristic ch) {
-  const uint8_t* d = ch.value();
-  target = { (int8_t)d[0], (int8_t)d[1], d[2], d[3] };
-  lastCmdMs = millis();
-  sprintf(rec_buff, "Got values: %d, %d, %d, %d", target.angular, target.linear, target.flags, target.seq);
-  Serial.println(rec_buff);
-}
+#include "utils.h"
+#include "types.h"
+#include "com.h"
+#include "sensor.h"
 
 void setup() {
   Serial.begin(115200);
-  if (!BLE.begin()) { while (1); }
-  BLE.setLocalName(DEVICE_NAME);
-  BLE.setAdvertisedService(cmdService);
-  cmdService.addCharacteristic(cmdChar);
-  BLE.addService(cmdService);
-  cmdChar.setEventHandler(BLEWritten, onCmdWritten);
-  BLE.advertise();
+  init_ble();
+  init_imu();
+  init_encoders();
+  Serial.println("all init");
+  while (sensor_calibrate_gyro()) {
+    Serial.println("Keep the bot still, calibrating sensors");
+  }
 }
 
 void loop() {
-  BLE.poll();  // process BLE events
-
-  // Failsafe: no command in 200ms → stop (link dropped)
-  if (millis() - lastCmdMs > 200) {
-    Serial.print("received: ");
-    Serial.print(target.linear);
-    Serial.println(target.angular);
-    target.linear = 0; target.angular = 0;
+  com_poll();
+  static uint32_t t_read = 0, t_print = 0;
+  static Vec3 angles;
+  static char buffer[100]; 
+  if (ms_period(200, t_print)) {
+    auto wheel_states = sensor_wheels();
+    sprintf(buffer, "left: %.3f, right: %.3f", wheel_states.left.speed, wheel_states.right.speed);
+    Serial.println(buffer);
   }
 
-  // Your balance loop reads target.linear / target.angular as setpoints.
-  // It runs at its own rate, independent of BLE arrival timing.
+  if (ms_period(5, t_read)){
+    angles = sensor_get_angles();
+  }
+
+  // if (ms_period(200, t_print)) {
+  //   char msg_buff[255];
+  //   sprintf(msg_buff, "Vec3 X: %.2f, Y: %.2f, Z: %.2f", angles.x, angles.y, angles.z);
+  //   Serial.println(msg_buff);
+  // }
 }

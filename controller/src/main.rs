@@ -25,7 +25,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .ok_or("no BLE adapter found")?;
 
 
-    // let _ = adapter.stop_scan().await;
+    let _ = adapter.stop_scan().await;
     println!("scanning...");
     adapter.start_scan(ScanFilter::default()).await?;
     time::sleep(Duration::from_secs(3)).await;
