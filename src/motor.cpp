@@ -11,9 +11,11 @@
 #define inA2 12
 
 
+
 mbed::PwmOut pwm_a(digitalPinToPinName(enA));
 mbed::PwmOut pwm_b(digitalPinToPinName(enB));
 
+bool motors_enabled = false;
 
 void init_motors() {
     pwm_a.period_ms(1);
@@ -31,6 +33,9 @@ void motor_set_a(float duty) {
         digitalWrite(inA1, LOW);
         digitalWrite(inA2, HIGH);
     }
+    if (!motors_enabled) {
+        duty = 0;
+    }
     pwm_a.write(fabsf(duty));
 }
 
@@ -45,5 +50,14 @@ void motor_set_b(float duty) {
         digitalWrite(inB1, LOW);
         digitalWrite(inB2, HIGH);
     }
+    if (!motors_enabled) {
+        duty = 0;
+    }
     pwm_b.write(fabsf(duty));
+}
+
+void set_motors_enabled(bool enabled) {
+    motors_enabled = enabled;
+    motor_set_a(0.0);
+    motor_set_b(0.0);
 }
