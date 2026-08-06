@@ -17,7 +17,7 @@ int init_imu();
 void init_encoders();
 void init_adc();
 float sensor_read_battery();
-int sensor_calibrate_gyro();
+int sensor_calibrate_imu();
 Vec3 sensor_get_angles();
 int sensor_get_pitch(PitchMeasurement &out);
 WheelStates sensor_wheels();

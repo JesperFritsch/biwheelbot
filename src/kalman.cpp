@@ -1,9 +1,23 @@
 #include "kalman.h"
 
-// Measurement noise R (diagonal), same units as the state: deg^2 and (deg/s)^2.
-// Starting guesses — replace with variances computed from a stationary bench
-// log (a few thousand samples per channel).
+// Baseline measurement noise R (diagonal), same units as the state: deg^2 and
+// (deg/s)^2. Valid while the bot is quiet. Starting guesses — replace with
+// variances computed from a stationary bench log (a few thousand samples).
 static const float R_DIAG[KF_M] = { 1.0f, 0.16f };
+
+// Scheduled-R gain for the accel channel, deg^2 per g^2. accel_dev is how much
+// non-gravity acceleration is corrupting the accel tilt angle right now, so
+// inflating R[0] with its square makes the filter smoothly stop trusting the
+// accel while the bot is shoved or translated, and coast on the gyro instead.
+// Physically derived: a lateral accel of dev [g] fakes a tilt of
+// atan(dev) ~ 57.3*dev deg; treating that worst case as the 1-sigma error gives
+// R inflation (57.3*dev)^2 ~ 3300*dev^2.
+static const float ACCEL_MOTION_GAIN = 3300.0f;
+
+void kalman_measurement_R(float accel_dev, float R_out[KF_M]) {
+    R_out[0] = R_DIAG[0] + ACCEL_MOTION_GAIN * accel_dev * accel_dev;
+    R_out[1] = R_DIAG[1];
+}
 
 // Process noise Q (diagonal), hand-tuned on the robot. Acts as a floor on P:
 // too low -> filter goes overconfident and reacts sluggishly to shoves,
@@ -79,7 +93,7 @@ void kalman_predict(KalmanFilter &kf) {
     for (int i = 0; i < KF_N; i++) kf.x[i] = x_new[i];
 }
 
-void kalman_update(KalmanFilter &kf, const float z[KF_M]) {
+void kalman_update(KalmanFilter &kf, const float z[KF_M], const float R[KF_M]) {
     float H[KF_M][KF_N];
     get_H(kf.x, H);
 
@@ -99,7 +113,7 @@ void kalman_update(KalmanFilter &kf, const float z[KF_M]) {
             for (int k = 0; k < KF_N; k++) s += HP[i][k] * H[j][k];
             S[i][j] = s;
         }
-        S[i][i] += R_DIAG[i];
+        S[i][i] += R[i];
     }
 
     static_assert(KF_M == 2, "S inverse below is hard-coded for 2x2");

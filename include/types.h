@@ -9,8 +9,9 @@ struct Vec3 {
 
 
 struct PitchMeasurement {
-    float angle; // degrees, accel-derived tilt
-    float rate;  // deg/s, gyro (sign matches d(angle)/dt)
+    float angle;     // degrees, accel-derived tilt
+    float rate;      // deg/s, gyro (sign matches d(angle)/dt)
+    float accel_dev; // |accel magnitude - calibrated rest magnitude| in g; >0 means non-gravity accel is corrupting `angle`
 };
 
 

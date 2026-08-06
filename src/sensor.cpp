@@ -37,6 +37,8 @@ static volatile uint32_t last_tick_a = 0, last_tick_b = 0;
 static volatile uint32_t miss_count = 0;
 
 Vec3 gyro_cal{};
+static float accel_norm_rest = 1.0f;  // resting |accel| measured at calibration; absorbs the accel's static offset/scale error
+static float accel_dev_floor = 0.0f;  // 3 sigma of resting |accel| noise; deviations below this are indistinguishable from noise
 
 void encode_a();
 void encode_b();
@@ -168,19 +170,36 @@ int sensor_get_pitch(PitchMeasurement &out) {
     if (get_raw_accel(acc)) return 1;
     out.angle = atan2f(acc.y, acc.z) * 180.0f / PI;
     out.rate = -(gyr.x - gyro_cal.x);
+    // How far the total accel is from pure gravity = how hard `angle` is lying
+    // right now. The measured noise floor is subtracted so plain sensor noise
+    // reads as 0 and the filter keeps full baseline accel trust at rest.
+    float norm = sqrtf(acc.x*acc.x + acc.y*acc.y + acc.z*acc.z);
+    float dev = fabsf(norm - accel_norm_rest) - accel_dev_floor;
+    out.accel_dev = dev > 0.0f ? dev : 0.0f;
     return 0;
 }
 
 
-int sensor_calibrate_gyro() {
+int sensor_calibrate_imu() {
     float sum[3] = {0,0,0};
     float sumsq[3] = {0,0,0};
+    float norm_sum = 0, norm_sumsq = 0;
+    int norm_n = 0;
     Vec3 vals;
+    Vec3 acc;
     for (int i = 0; i < GYRO_CALIB_SAMPLES; i++) {
         while (get_raw_gyro(vals)) {}
         for (int j = 0; j < 3; j++) {
             sum[j] += vals[j];
             sumsq[j] += vals[j]*vals[j];
+        }
+        // Bot is still during calibration: average the resting accel magnitude
+        // as the reference for PitchMeasurement.accel_dev.
+        if (!get_raw_accel(acc)) {
+            float norm = sqrtf(acc.x*acc.x + acc.y*acc.y + acc.z*acc.z);
+            norm_sum += norm;
+            norm_sumsq += norm * norm;
+            norm_n++;
         }
     }
     Vec3 mean_vals;
@@ -199,6 +218,11 @@ int sensor_calibrate_gyro() {
     }
     for (int i = 0; i < 3; i++) {
         gyro_cal[i] = mean_vals[i];
+    }
+    if (norm_n > 0) {
+        accel_norm_rest = norm_sum / norm_n;
+        float var = norm_sumsq / norm_n - accel_norm_rest * accel_norm_rest;
+        accel_dev_floor = 3.0f * sqrtf(var > 0.0f ? var : 0.0f);
     }
     return 0;
 }

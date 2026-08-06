@@ -15,4 +15,7 @@ struct KalmanFilter {
 
 void kalman_init(KalmanFilter &kf, const float z0[KF_M]);
 void kalman_predict(KalmanFilter &kf);
-void kalman_update(KalmanFilter &kf, const float z[KF_M]);
+// R is per-update so it can be scheduled on measurement quality: build it with
+// kalman_measurement_R from the current accel-magnitude deviation.
+void kalman_update(KalmanFilter &kf, const float z[KF_M], const float R[KF_M]);
+void kalman_measurement_R(float accel_dev, float R_out[KF_M]);

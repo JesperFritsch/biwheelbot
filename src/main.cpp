@@ -37,7 +37,7 @@ void setup() {
   analogWriteResolution(12);
   analogReadResolution(12);
 
-  while (sensor_calibrate_gyro()) {
+  while (sensor_calibrate_imu()) {
     Serial.println("Keep the bot still, calibrating sensors");
   }
 
@@ -65,7 +65,9 @@ void loop() {
     kalman_predict(kf);
     if (!sensor_get_pitch(m)) {
       float z[KF_M] = { m.angle, m.rate };
-      kalman_update(kf, z);
+      float R[KF_M];
+      kalman_measurement_R(m.accel_dev, R);
+      kalman_update(kf, z, R);
 
       if (!comp_init) { comp = m.angle; comp_init = true; }
       comp = COMP_BALANCE * (comp + m.rate * KF_DT) + (1 - COMP_BALANCE) * m.angle;
@@ -77,11 +79,11 @@ void loop() {
     // '#' per 2%. Single line with \r so it redraws in place instead of
     // scrolling.
     static char line[140];
-    int n = sprintf(line, "\rcomp [");
+    int n = sprintf(line, "\rcomp: %5.1f[", comp);
     n += render_bar(line + n, comp);
-    n += sprintf(line + n, "]  kf [");
+    n += sprintf(line + n, "]  kf: %5.1f [", kf.x[0]);
     n += render_bar(line + n, kf.x[0]);
-    line[n++] = ']';
+    n += sprintf(line + n, "]  dev %5.3fg", m.accel_dev);
     line[n] = 0;
     Serial.print(line);
   }
