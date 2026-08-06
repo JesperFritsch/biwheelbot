@@ -20,17 +20,8 @@
 
 #define BATT_V_PIN A0
 
-#define GYRO_CALIB_SAMPLES 128
+#define GYRO_CALIB_SAMPLES 256
 #define SPEED_TICK_TIMEOUT_US 100000
-
-constexpr float V_BATT_SCALE = 0.003429327f;
-
-constexpr float GYRO_STDDEV = 0.17f; // standard deviation threshold, if lower than this then the bot is completely still.
-constexpr float COMP_BALANCE = 0.95f; // What balance to use in the complimentary filter
-
-constexpr float WHEEL_CIRCUM_MM = 226.0f;
-constexpr float COUNTS_PER_REV = 425.0f;
-constexpr float MM_PER_COUNT = WHEEL_CIRCUM_MM / COUNTS_PER_REV;
 
 static const int8_t DECODE_TABLE[16] = {
     0, -1,  1,  0,
@@ -52,10 +43,6 @@ void encode_b();
 
 
 WheelStates sensor_wheels() {
-
-    Serial.print("Miss count: ");
-    Serial.println(miss_count);
-
     uint32_t current_us = micros();
     float speed_a = current_us - last_tick_a > SPEED_TICK_TIMEOUT_US ? 0 : motor_a_speed_mms;
     float speed_b = current_us - last_tick_b > SPEED_TICK_TIMEOUT_US ? 0 : motor_b_speed_mms;
@@ -87,11 +74,6 @@ int init_imu() {
     write_imu_reg(0x6B, 0x20, 0xB0);  // CTRL_REG6_XL: ODR=101 (476Hz), FS=4g
 
     return 1;
-}
-
-
-void init_adc() {
-    analogReadResolution(12);
 }
 
 
@@ -174,6 +156,19 @@ Vec3 sensor_get_angles() {
     prev = out;
     timestamp = time_us;
     return out;
+}
+
+
+// Pitch measurement for the Kalman filter, pre-converted to filter units
+// (degrees / deg/s) so H stays linear and trivial. Sign convention matches
+// the complementary filter above: positive rate = increasing accel angle.
+int sensor_get_pitch(PitchMeasurement &out) {
+    Vec3 gyr, acc;
+    if (get_raw_gyro(gyr)) return 1;
+    if (get_raw_accel(acc)) return 1;
+    out.angle = atan2f(acc.y, acc.z) * 180.0f / PI;
+    out.rate = -(gyr.x - gyro_cal.x);
+    return 0;
 }
 
 

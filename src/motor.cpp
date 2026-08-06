@@ -1,5 +1,6 @@
 
 #include "motor.h"
+#include <mbed.h>
 #include "Arduino.h"
 
 #define enB 9
@@ -10,34 +11,39 @@
 #define inA2 12
 
 
+mbed::PwmOut pwm_a(digitalPinToPinName(enA));
+mbed::PwmOut pwm_b(digitalPinToPinName(enB));
+
+
+void init_motors() {
+    pwm_a.period_ms(1);
+    pwm_b.period_ms(1);
+}
+
+
 void motor_set_a(float duty) {
     // duty is -1 - 1;
-    int pwm = 0;
     if (duty > 0) {
         digitalWrite(inA1, HIGH);
         digitalWrite(inA2, LOW);
-        pwm = duty * 0xff;
     }
     else {
         digitalWrite(inA1, LOW);
         digitalWrite(inA2, HIGH);
-        pwm = -duty * 0xff;
     }
-    analogWrite(enA, pwm);
+    pwm_a.write(fabsf(duty));
 }
+
 
 void motor_set_b(float duty) {
     // duty is -1 - 1;
-    int pwm = 0;
     if (duty > 0) {
         digitalWrite(inB1, HIGH);
         digitalWrite(inB2, LOW);
-        pwm = duty * 0xff;
     }
     else {
         digitalWrite(inB1, LOW);
         digitalWrite(inB2, HIGH);
-        pwm = -duty * 0xff;
     }
-    analogWrite(enB, pwm);
+    pwm_b.write(fabsf(duty));
 }
