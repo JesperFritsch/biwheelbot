@@ -14,14 +14,26 @@ struct PitchMeasurement {
     float accel_dev; // |accel magnitude - calibrated rest magnitude| in g; >0 means non-gravity accel is corrupting `angle`
 };
 
+struct WheelSpeed {
+    float a;
+    float b;
+    float avg_speed() const { return (a + b) * 0.5f; }
+};
+
+struct WheelPosition {
+    int32_t a;
+    int32_t b;
+    int32_t avg_pos() const { return (a + b) / 2; }
+};
 
 struct WheelState {
-    float speed; // mm per second
-    int32_t count;
+    WheelSpeed speed;
+    WheelPosition position;
 };
 
-
-struct WheelStates {
-    WheelState a;
-    WheelState b;
+struct PIDGains {
+    float kp;
+    float ki;
+    float kd;
 };
+

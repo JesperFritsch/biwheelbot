@@ -18,8 +18,8 @@ mbed::PwmOut pwm_b(digitalPinToPinName(enB));
 bool motors_enabled = false;
 
 void init_motors() {
-    pwm_a.period_ms(1);
-    pwm_b.period_ms(1);
+    pwm_a.period_us(300);
+    pwm_b.period_us(300);
 }
 
 
