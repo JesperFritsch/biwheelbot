@@ -453,7 +453,10 @@ int get_raw_accel(Vec3 &out) {
 }
 
 
-
+void sensor_reset_position() {
+    enc_count_a = 0;
+    enc_count_b = 0;
+}
 
 // Pitch measurement for the Kalman filter, pre-converted to filter units
 // (degrees / deg/s) so H stays linear and trivial. Sign convention matches

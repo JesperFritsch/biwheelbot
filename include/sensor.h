@@ -23,7 +23,7 @@ float sensor_read_battery();
 int sensor_calibrate_imu();
 int sensor_get_pitch(PitchMeasurement &out);
 WheelState sensor_get_wheels();
-
+void sensor_reset_position();
 
 // Where the free-running pole index sits relative to the calibration table.
 //

@@ -18,4 +18,9 @@ void kalman_predict(KalmanFilter &kf);
 // R is per-update so it can be scheduled on measurement quality: build it with
 // kalman_measurement_R from the current accel-magnitude deviation.
 void kalman_update(KalmanFilter &kf, const float z[KF_M], const float R[KF_M]);
-void kalman_measurement_R(float accel_dev, float R_out[KF_M]);
+
+// `innovation` is z[0] - x[0], the accelerometer's tilt minus the
+// gyro-propagated one. Since h() is the identity on x[0], the caller can form
+// it as `m.angle - kf.x[0]` between kalman_predict and kalman_update -- it is
+// exactly the y[0] the update will compute.
+void kalman_measurement_R(float accel_dev, float innovation, float R_out[KF_M]);

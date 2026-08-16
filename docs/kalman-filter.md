@@ -58,7 +58,8 @@ a stationary bench log (variance of a few thousand samples per channel).
 |---|---|---|
 | `R_DIAG[0]` | 1.0 deg² | accel-angle noise while quiet |
 | `R_DIAG[1]` | 0.16 (deg/s)² | gyro rate noise |
-| `Q_DIAG[0]` | 0.005 deg² | per-step angle model slack. **Main responsiveness knob**: sets how fast θ pulls toward the accel angle (settle speed after motion). 0.001 was visibly laggier than the comp filter; 0.005 matches it. |
+| `Q_DIAG[0]` | 0.005 deg² | per-step angle model slack. **Main responsiveness knob**: sets how fast θ pulls toward the accel angle (settle speed after motion). 0.001 was visibly laggier than the comp filter; 0.005 matches it. Confirmed numerically: at rest 0.005 gives K[0][0] = 0.068 against the comp filter's 0.030, but at rest is the wrong operating point — while balancing `accel_dev` is continuously nonzero and the schedule already brings K to ≈0.035 at dev = 0.03 and ≈0.020 at dev = 0.06. Q[0] = 0.001 would put those at 0.016 and 0.009. |
+| `Q_DIAG[1]` | — | has almost no effect on the *angle*: the gyro measurement pins P[1][1] directly and the leakage into P[0][0] is dt²·Q[1] = 0.000625, negligible beside Q[0]. K[0][0] is unchanged (0.0683) for Q[1] anywhere from 0.5 to 25. Tune the angle's responsiveness with Q[0], not Q[1]. |
 | `Q_DIAG[1]` | 25 (deg/s)² | per-step rate slack (√25 = 5 deg/s per 5 ms). Deliberately large so θ̇ tracks the gyro at ≈0.99 gain despite the constant-velocity lie. |
 
 Q is a diagonal simplification (the exact constant-velocity Q has dt-coupled
@@ -76,6 +77,7 @@ accel trust (comp filter, plain KF) leans with it.
 
 ```
 R[0] = R_DIAG[0] + 3300 · dev²        // kalman_measurement_R()
+if |y[0]| > 3°:  R[0] *= |y[0]| / 3°  // innovation gate, same function
 ```
 
 `dev` (g) is the current non-gravity acceleration, detected from the accel

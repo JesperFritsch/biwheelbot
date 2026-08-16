@@ -19,12 +19,15 @@
 //! sitting at exactly zero has no magnitude to scale, so it steps by FLOOR_STEP
 //! instead -- otherwise a zeroed gain could never be raised.
 
-use std::io;
-use std::time::{Duration, Instant};
+use std::fs::File;
+use std::io::{self, BufWriter, Write};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Result};
 use btleplug::api::{Central, Characteristic, Manager as _, Peripheral as _, ScanFilter, WriteType};
 use btleplug::platform::{Manager, Peripheral};
+use futures::StreamExt;
+use tokio::sync::mpsc::{self, UnboundedReceiver};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -44,6 +47,10 @@ const DEVICE_NAME: &str = "BiWheelBot";
 /// which characteristics are gains. Discovering everything instead would sweep
 /// up cmdChar and try to render it as a PID.
 const CONFIG_SVC: Uuid = uuid!("19b10002-e8f2-537e-4f6c-d104768a1214");
+
+/// Telemetry sits in its own service so the gain discovery above can't mistake
+/// it for an editable PID block.
+const TELEM_SVC: Uuid = uuid!("19b10006-e8f2-537e-4f6c-d104768a1214");
 
 /// 16-bit SIG-assigned UUIDs are an alias for a slot in the Bluetooth Base
 /// UUID -- only bits 96..111 vary, everything else is fixed. The host stack
@@ -71,6 +78,82 @@ struct Group {
     dirty: bool,
 }
 
+/// Live telemetry stream, described by its own 0x2901 schema and logged to CSV
+/// as it arrives. The wire format carries no field identifiers, so a payload
+/// whose length disagrees with the schema means the firmware and the schema
+/// have drifted -- or the MTU is too small and the tail was silently clipped.
+struct Telem {
+    fields: Vec<String>,
+    latest: Vec<f32>,
+    packets: u64,
+    started: Instant,
+    csv: Option<BufWriter<File>>,
+    csv_path: String,
+    warn: Option<String>,
+}
+
+impl Telem {
+    fn new(fields: Vec<String>) -> Self {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let csv_path = format!("telemetry-{stamp}.csv");
+
+        let csv = File::create(&csv_path).ok().map(|f| {
+            let mut w = BufWriter::new(f);
+            let _ = writeln!(w, "t,{}", fields.join(","));
+            w
+        });
+
+        Telem {
+            latest: vec![f32::NAN; fields.len()],
+            fields,
+            packets: 0,
+            started: Instant::now(),
+            csv,
+            csv_path,
+            warn: None,
+        }
+    }
+
+    fn push(&mut self, bytes: &[u8]) {
+        let got = bytes.len() / 4;
+        if got != self.fields.len() {
+            self.warn = Some(format!(
+                "schema says {} fields, packet carried {got} -- MTU too small?",
+                self.fields.len()
+            ));
+            return;
+        }
+        self.warn = None;
+        self.packets += 1;
+
+        for (i, c) in bytes.chunks_exact(4).enumerate() {
+            self.latest[i] = f32::from_le_bytes(c.try_into().unwrap());
+        }
+
+        if let Some(w) = self.csv.as_mut() {
+            let t = self.started.elapsed().as_secs_f64();
+            let _ = write!(w, "{t:.3}");
+            for v in &self.latest {
+                let _ = write!(w, ",{v}");
+            }
+            let _ = writeln!(w);
+            // Flush about once a second so a crash costs at most one second of
+            // log rather than the whole buffer.
+            if self.packets.is_multiple_of(40) {
+                let _ = w.flush();
+            }
+        }
+    }
+
+    fn hz(&self) -> f64 {
+        let secs = self.started.elapsed().as_secs_f64();
+        if secs > 0.0 { self.packets as f64 / secs } else { 0.0 }
+    }
+}
+
 struct App {
     groups: Vec<Group>,
     /// Flattened (group, field) index, in display order.
@@ -79,6 +162,7 @@ struct App {
     edit: Option<String>,
     status: String,
     label_w: usize,
+    telem: Option<Telem>,
 }
 
 impl App {
@@ -97,6 +181,7 @@ impl App {
             edit: None,
             status: String::new(),
             label_w,
+            telem: None,
         }
     }
 
@@ -212,6 +297,47 @@ async fn connect() -> Result<Peripheral> {
 /// Walk the config service and build a group per self-describing characteristic.
 /// Returns the groups plus a note for anything skipped, so a firmware that is
 /// missing a descriptor says so instead of silently vanishing from the list.
+/// Read a characteristic's 0x2901 descriptor and parse it as `name:f1,f2,...`.
+/// BlueZ issues Read Blob requests for values longer than one MTU, so a schema
+/// bigger than a single response still arrives whole.
+async fn read_schema(p: &Peripheral, ch: &Characteristic) -> Option<(String, Vec<String>)> {
+    let desc = ch.descriptors.iter().find(|d| d.uuid == USER_DESC)?;
+    let raw = p.read_descriptor(desc).await.ok()?;
+    parse_schema(&String::from_utf8_lossy(&raw))
+}
+
+/// Find the telemetry characteristic, read its schema, and subscribe. Returns
+/// the field names plus a receiver fed by a background task, so the draw loop
+/// can drain packets without awaiting the stream.
+async fn discover_telemetry(
+    p: &Peripheral,
+) -> Result<(Vec<String>, UnboundedReceiver<Vec<u8>>)> {
+    let ch = p
+        .characteristics()
+        .into_iter()
+        .find(|c| c.service_uuid == TELEM_SVC)
+        .ok_or_else(|| anyhow!("no characteristic in telemetry service {TELEM_SVC}"))?;
+
+    let (_, fields) = read_schema(p, &ch)
+        .await
+        .ok_or_else(|| anyhow!("telemetry characteristic has no usable 0x2901 schema"))?;
+
+    p.subscribe(&ch).await?;
+    let mut stream = p.notifications().await?;
+    let uuid = ch.uuid;
+    let (tx, rx) = mpsc::unbounded_channel();
+
+    tokio::spawn(async move {
+        while let Some(n) = stream.next().await {
+            if n.uuid == uuid && tx.send(n.value).is_err() {
+                break; // receiver dropped -- the TUI is shutting down
+            }
+        }
+    });
+
+    Ok((fields, rx))
+}
+
 async fn discover(p: &Peripheral) -> Result<(Vec<Group>, Vec<String>)> {
     let mut chars: Vec<Characteristic> = p
         .characteristics()
@@ -254,10 +380,56 @@ async fn discover(p: &Peripheral) -> Result<(Vec<Group>, Vec<String>)> {
     Ok((groups, skipped))
 }
 
+const TELEM_COLS: usize = 4;
+
+fn telem_lines(t: &Telem) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+
+    let head = match &t.warn {
+        Some(w) => Line::from(Span::styled(
+            format!(" {w}"),
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        )),
+        None => Line::from(Span::styled(
+            format!(
+                " {} packets   {:.1} Hz   -> {}",
+                t.packets,
+                t.hz(),
+                t.csv_path
+            ),
+            Style::default().fg(Color::DarkGray),
+        )),
+    };
+    lines.push(head);
+
+    for row in t.fields.chunks(TELEM_COLS).enumerate() {
+        let (r, names) = row;
+        let mut s = String::from(" ");
+        for (c, name) in names.iter().enumerate() {
+            let v = t.latest[r * TELEM_COLS + c];
+            if v.is_nan() {
+                s.push_str(&format!("{name:>6}       --   "));
+            } else {
+                s.push_str(&format!("{name:>6} {v:>10.3}   "));
+            }
+        }
+        lines.push(Line::from(s));
+    }
+    lines
+}
+
 fn ui(f: &mut Frame, app: &App) {
+    // The telemetry pane sizes itself to the discovered field count: one row
+    // per TELEM_COLS fields, plus a header line and the block borders.
+    let telem_h = match &app.telem {
+        Some(t) => (t.fields.len().div_ceil(TELEM_COLS) + 3) as u16,
+        None => 0,
+    };
+
     let chunks = Layout::vertical([
         Constraint::Length(3),
         Constraint::Min(5),
+        Constraint::Length(telem_h),
         Constraint::Length(3),
     ])
     .split(f.area());
@@ -308,6 +480,14 @@ fn ui(f: &mut Frame, app: &App) {
         chunks[1],
     );
 
+    if let Some(t) = &app.telem {
+        f.render_widget(
+            Paragraph::new(telem_lines(t))
+                .block(Block::default().borders(Borders::ALL).title(" telemetry ")),
+            chunks[2],
+        );
+    }
+
     let footer = match &app.edit {
         Some(buf) => Line::from(vec![
             Span::styled("value: ", Style::default().fg(Color::Yellow)),
@@ -323,7 +503,7 @@ fn ui(f: &mut Frame, app: &App) {
     };
     f.render_widget(
         Paragraph::new(footer).block(Block::default().borders(Borders::ALL)),
-        chunks[2],
+        chunks[3],
     );
 }
 
@@ -369,6 +549,19 @@ async fn main() -> Result<()> {
         .collect::<Vec<_>>()
         .join(", ");
     let mut app = App::new(groups);
+
+    // Telemetry is optional -- a firmware without it should still tune gains.
+    let telem_rx = match discover_telemetry(&peripheral).await {
+        Ok((fields, rx)) => {
+            app.telem = Some(Telem::new(fields));
+            Some(rx)
+        }
+        Err(e) => {
+            notes.push(format!("telemetry: {e}"));
+            None
+        }
+    };
+
     app.status = if notes.is_empty() {
         format!("connected to {DEVICE_NAME} -- {found}")
     } else {
@@ -380,12 +573,20 @@ async fn main() -> Result<()> {
     execute!(stdout, EnterAlternateScreen)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;
 
-    let result = run(&mut terminal, &mut app, &peripheral).await;
+    let result = run(&mut terminal, &mut app, &peripheral, telem_rx).await;
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
     peripheral.disconnect().await.ok();
+
+    // Whatever is still buffered is worth keeping.
+    if let Some(t) = app.telem.as_mut() {
+        if let Some(w) = t.csv.as_mut() {
+            let _ = w.flush();
+        }
+        println!("telemetry log: {} ({} packets)", t.csv_path, t.packets);
+    }
 
     result
 }
@@ -394,10 +595,20 @@ async fn run(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
     p: &Peripheral,
+    mut telem_rx: Option<UnboundedReceiver<Vec<u8>>>,
 ) -> Result<()> {
     let mut last_write = Instant::now();
 
     loop {
+        // Drain whatever the notification task has queued since the last frame.
+        // try_recv keeps the draw loop synchronous -- notifications arrive far
+        // faster than the 50 ms redraw, so this is normally a few packets.
+        if let (Some(rx), Some(t)) = (telem_rx.as_mut(), app.telem.as_mut()) {
+            while let Ok(bytes) = rx.try_recv() {
+                t.push(&bytes);
+            }
+        }
+
         terminal.draw(|f| ui(f, app))?;
 
         if event::poll(Duration::from_millis(50))? {

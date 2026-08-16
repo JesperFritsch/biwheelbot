@@ -1,5 +1,7 @@
 #include "kalman.h"
 
+#include <math.h>
+
 // Baseline measurement noise R (diagonal), same units as the state: deg^2 and
 // (deg/s)^2. Valid while the bot is quiet. Starting guesses — replace with
 // variances computed from a stationary bench log (a few thousand samples).
@@ -14,8 +16,34 @@ static const float R_DIAG[KF_M] = { 1.0f, 0.16f };
 // R inflation (57.3*dev)^2 ~ 3300*dev^2.
 static const float ACCEL_MOTION_GAIN = 3300.0f;
 
-void kalman_measurement_R(float accel_dev, float R_out[KF_M]) {
+// The magnitude test above has a blind spot: lateral acceleration adds to
+// gravity in quadrature, so it barely moves |a| while faking a large tilt. A
+// 0.1 g shove fakes 5.7 deg of tilt and changes the magnitude by 0.5%, inflating
+// R by 8% -- effectively nothing.
+//
+// The innovation catches what the magnitude misses, because it consults the
+// gyro instead of the accelerometer. Over a single 5 ms tick the gyro cannot be
+// wrong by several degrees, so a large disagreement means the accelerometer is
+// reading translation, not tilt.
+//
+// 3 deg sits comfortably outside both legitimate sources of innovation: real
+// tilt manages about 1 deg per tick even at 200 deg/s, and the accel's own
+// noise is ~1 deg (R_DIAG[0] = 1.0).
+static const float INNOV_GATE_DEG = 3.0f;
+
+void kalman_measurement_R(float accel_dev, float innovation, float R_out[KF_M]) {
     R_out[0] = R_DIAG[0] + ACCEL_MOTION_GAIN * accel_dev * accel_dev;
+
+    // Linear past the gate, deliberately. Inflating with the square would make
+    // the correction K*y peak and then shrink as the innovation grows, which
+    // locks the accelerometer out entirely if the state is genuinely wrong.
+    // Linear makes the correction saturate instead, so the filter always
+    // recovers -- slowly, but it recovers.
+    float a = fabsf(innovation);
+    if (a > INNOV_GATE_DEG) {
+        R_out[0] *= a / INNOV_GATE_DEG;
+    }
+
     R_out[1] = R_DIAG[1];
 }
 
@@ -24,6 +52,18 @@ void kalman_measurement_R(float accel_dev, float R_out[KF_M]) {
 // too high -> raw sensor noise passes through to the control loop.
 // Q[1] is large because the constant-velocity model is a poor fit while the
 // motors are actively torquing the body around.
+//
+// Note Q[1] has almost no effect on how much accelerometer reaches the angle:
+// the gyro measurement pins P[1][1] directly, and the leakage into P[0][0] is
+// dt^2 * Q[1] = 0.000625, negligible beside Q[0]. Q[0] is the knob for that.
+//
+// Q[0] stays at 0.005 despite that putting the at-rest accel weight at 0.068,
+// against 0.030 for a complementary filter at alpha = 0.97. The at-rest figure
+// is the wrong comparison: while balancing, accel_dev is continuously nonzero
+// and the schedule already pulls the effective weight to ~0.035 at dev = 0.03
+// and ~0.020 at dev = 0.06. Dropping Q[0] to 0.001 would put those at 0.016 and
+// 0.009 -- a third of the complementary filter during exactly the motion that
+// matters, which is the lag recorded in docs/kalman-filter.md.
 static const float Q_DIAG[KF_N] = { 0.005f, 25.0f };
 
 // --- The four EKF touch-points ---------------------------------------------

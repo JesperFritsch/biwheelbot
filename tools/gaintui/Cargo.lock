@@ -399,6 +399,7 @@ dependencies = [
  "anyhow",
  "btleplug",
  "crossterm",
+ "futures",
  "ratatui",
  "tokio",
  "uuid",

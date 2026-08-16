@@ -1,8 +1,26 @@
 #include <ArduinoBLE.h>
 
+// Not part of ArduinoBLE's documented API -- setMaxMtu lives on the internal
+// ATTClass, reachable only through `extern ATTClass& ATT;`. Needed because the
+// default MTU of 23 caps a notification at 20 bytes, and telemetry is 48.
+// Pin the library version in platformio.ini while depending on this.
+#include "utility/ATT.h"
+
 #include "com.h"
 #include "types.h"
-#define DEVICE_NAME "BiWheelBot" 
+#define DEVICE_NAME "BiWheelBot"
+
+// Gives 93 bytes of notification payload (mtu - 3) and 95 for a read response
+// (mtu - 1), so both the telemetry packet and its schema string fit in a single
+// round trip with room to grow.
+//
+// Constraint before raising this further, or adding encrypted characteristics:
+// ATT.h:102 declares `uint8_t holdBuffer[64]`, the only buffer in the library
+// not sized from the negotiated MTU. It is written only on the encryption-hold
+// path -- a characteristic declared with BLEPermission::BLEEncryption being read
+// before the link is encrypted. None of ours set permissions, so that path is
+// unreachable here; if that ever changes, this must come back down to 64.
+#define MAX_MTU 96
 
 
 static const uint8_t ZEROS[512] = {0};
@@ -28,6 +46,18 @@ BLEDescriptor speedDesc("2901", "speed:kp,ki,kd");
 
 BLECharacteristic posPIDGains("19b10005-e8f2-537e-4f6c-d104768a1214", BLEWrite | BLERead, 12);
 BLEDescriptor posDesc("2901", "position:kp,ki,kd");
+
+// Telemetry lives in its own service: gaintui treats every 0x2901-carrying
+// characteristic in configService as an editable gain block, and this one is
+// neither editable nor three floats.
+BLEService telemetryService("19b10006-e8f2-537e-4f6c-d104768a1214");
+
+// TELEM_FIELDS little-endian f32, in the order named by the schema below.
+// The names and the pack order in main.cpp's loop() must stay in step -- the
+// wire format carries no field identifiers, only the schema does.
+BLECharacteristic telemetryChar("19b10007-e8f2-537e-4f6c-d104768a1214",
+                                BLERead | BLENotify, TELEM_FIELDS * sizeof(float));
+BLEDescriptor telemetryDesc("2901", "telem:ang,rate,kfa,cmp,tpos,pos,tang,tspd,eff,spd,duty,bat,en,ovr");
 
 static ComHooks com_hooks = {};
 
@@ -87,22 +117,35 @@ void on_char_read(BLEDevice central, BLECharacteristic ch) {
 }
 
 void init_ble() {
+    // Must precede begin(): the ceiling is applied when a central negotiates,
+    // and everything downstream is already sized from the agreed value.
+    ATT.setMaxMtu(MAX_MTU);
+
     if (!BLE.begin()) { while (1); }
     BLE.setLocalName(DEVICE_NAME);
     BLE.setAdvertisedService(cmdService);
     BLE.setAdvertisedService(configService);
+    // Telemetry is deliberately not advertised -- an advertising packet holds
+    // only one 128-bit UUID anyway, and gaintui matches on the device name and
+    // then discovers every service over the connection.
 
+    // Descriptors and characteristics must be attached before addService():
+    // GATT flattens the service into a handle table at that point and never
+    // revisits it.
     balancePIDGains.addDescriptor(balanceDesc);
     speedPIDGains.addDescriptor(speedDesc);
     posPIDGains.addDescriptor(posDesc);
+    telemetryChar.addDescriptor(telemetryDesc);
 
     cmdService.addCharacteristic(cmdChar);
     configService.addCharacteristic(balancePIDGains);
     configService.addCharacteristic(speedPIDGains);
     configService.addCharacteristic(posPIDGains);
+    telemetryService.addCharacteristic(telemetryChar);
 
     BLE.addService(cmdService);
     BLE.addService(configService);
+    BLE.addService(telemetryService);
     cmdChar.setEventHandler(BLEWritten, on_char_written);
     balancePIDGains.setEventHandler(BLEWritten, on_char_written);
     speedPIDGains.setEventHandler(BLEWritten, on_char_written);
@@ -113,7 +156,21 @@ void init_ble() {
     seed_char(balancePIDGains);
     seed_char(speedPIDGains);
     seed_char(posPIDGains);
+    // A zero-length value makes a read fail with INVALID_OFFSET before the
+    // handler ever runs, so every readable characteristic needs a first value.
+    seed_char(telemetryChar);
+
+    // Notifications can only go out as often as the connection interval allows.
+    BLE.setConnectionInterval(0x0006, 0x0010);   // 7.5 ms .. 20 ms
+
     BLE.advertise();
+}
+
+// Call from loop(), never from the control thread -- ArduinoBLE is not thread
+// safe and com_poll() already drives the stack from the main thread.
+void com_publish_telemetry(const float *values, int count) {
+    if (count != TELEM_FIELDS) return;   // schema and payload must agree
+    telemetryChar.writeValue((const uint8_t *)values, count * sizeof(float));
 }
 
 void com_poll() {
