@@ -23,7 +23,7 @@ static rtos::Thread control_thread(osPriorityHigh, sizeof(control_stack),
 
 static rtos::Mutex snap_mutex;
 static ControlSnapshot snap;
-static volatile uint32_t overruns = 0;
+static volatile uint32_t overruns = 0, imu_misses = 0, consecutive_imu_misses = 0;
 static KalmanFilter kf;
 static PitchMeasurement m{};
 static MotorState motor_state = MotorState::OFF;
@@ -34,29 +34,6 @@ static uint32_t timestamp;
 
 static ComplementaryFilter comp(0.97f);   // tau = 162 ms at the 5 ms tick
 static volatile bool use_complementary = false;
-
-static volatile bool print_bars = false;
-#define BAR_W 51                 
-#define BAR_EVERY 1             
-
-static void angle_bar(float angle, char out[BAR_W + 1]) {
-    if (angle < -90.0f) angle = -90.0f;
-    else if (angle > 90.0f) angle = 90.0f;
-
-    const int centre = BAR_W / 2;
-    int idx = (int)((angle + 90.0f) / 180.0f * (BAR_W - 1) + 0.5f);
-    if (idx < 0) idx = 0;
-    else if (idx > BAR_W - 1) idx = BAR_W - 1;
-
-    const int lo = idx < centre ? idx : centre;
-    const int hi = idx < centre ? centre : idx;
-    for (int i = 0; i < BAR_W; i++) {
-        out[i] = (i > lo && i < hi) ? '=' : '.';
-    }
-    out[centre] = '|';
-    out[idx] = '#';          // wins over the centre mark when the angle is ~0
-    out[BAR_W] = '\0';
-}
 
 static const float MAX_SPEED = 1200.0f;
 static const float MAX_ANGLE = 45.f;
@@ -79,6 +56,18 @@ static volatile PIDGains angle_to_duty = {
     kd: 0.000912f
 };
 
+static volatile PIDGains pos_to_turn = {
+    kp: 0,
+    ki: 0,
+    kd: 0
+};
+
+static volatile PIDGains turn_rate = {
+    kp: 0,
+    ki: 0,
+    kd: 0
+};
+
 void reset_position() {
     sensor_reset_position();
     t_pos = sensor_get_wheels().position;
@@ -89,6 +78,8 @@ static void control_loop() {
     auto pos_pid = PIDController(pos_to_speed, MAX_SPEED);
     auto speed_pid = PIDController(speed_to_angle, MAX_ANGLE);
     auto duty_pid = PIDController(angle_to_duty);
+    auto pos_turn_pid = PIDController(pos_to_turn);
+    auto turn_pid = PIDController(turn_rate);
     auto pos_speed_lp = LowPassFilter(pos_speed_lp_steps);
     auto speed_angle_lp = LowPassFilter(speed_angle_lp_steps);
 
@@ -98,16 +89,22 @@ static void control_loop() {
         auto passed_time_s = passed_time / 1000000.f;
         timestamp = current_time;
         kalman_predict(kf);
-        if (!sensor_get_pitch(m)) {
+        if (!sensor_poll_imu()) {
+            consecutive_imu_misses = 0;
+            sensor_get_pitch(m);
             float z[KF_M] = { m.angle, m.rate };
             float R[KF_M];
             kalman_measurement_R(m.accel_dev, m.angle - kf.x[0], R);
             kalman_update(kf, z, R);
             comp.update(m.angle, m.rate, passed_time_s);
+        } else {
+            imu_misses++;
+            consecutive_imu_misses++;
         }
 
         float est_angle = use_complementary ? comp.value() : kf.x[0];
         float est_rate  = use_complementary ? m.rate       : kf.x[1];
+        float est_yaw_rate = sensor_get_yaw_rate(est_angle);
 
         cycles_batt++;
         if (cycles_batt >= 20) {
@@ -115,7 +112,7 @@ static void control_loop() {
             cycles_batt = 0;
         }
 
-        auto new_motor_state = safety_update(est_angle, est_rate, v_batt);
+        auto new_motor_state = safety_update(est_angle, est_rate, v_batt, consecutive_imu_misses);
         auto w_state = sensor_get_wheels();
         auto w_speed = w_state.speed.avg_speed();
 
@@ -131,11 +128,12 @@ static void control_loop() {
 
         float pos_mm = w_state.position.avg_pos() * MM_PER_COUNT;
         float t_mm = t_pos.avg_pos() * MM_PER_COUNT;
+        // TODO implement commanded speed
         auto target_speed = pos_speed_lp.update(pos_pid.update(pos_mm, t_mm, passed_time_s));
         auto target_angle = speed_angle_lp.update(speed_pid.update(w_speed, target_speed, passed_time_s));
         auto effort_duty = -duty_pid.update(est_angle, target_angle, passed_time_s);
+
         auto true_duty = ff_duty(effort_duty);
-        // auto true_duty = effort_duty;
         
         motor_set_a(true_duty);
         motor_set_b(true_duty);
@@ -161,19 +159,6 @@ static void control_loop() {
             };
         }
         
-        if (print_bars) {
-            static uint32_t bar_tick = 0;
-            if (++bar_tick >= BAR_EVERY) {
-                bar_tick = 0;
-                char kb[BAR_W + 1], cb[BAR_W + 1], line[BAR_W * 3];
-                angle_bar(kf.x[0], kb);
-                angle_bar(comp.value(), cb);
-                snprintf(line, sizeof(line), "KF %s %+6.1f   CMP %s %+6.1f",
-                         kb, kf.x[0], cb, comp.value());
-                Serial.println(line);
-            }
-        }
-
         next += 5ms;
         auto now = rtos::Kernel::Clock::now();
         if (now > next) {

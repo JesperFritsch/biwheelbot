@@ -22,6 +22,8 @@ void init_encoders();
 float sensor_read_battery();
 int sensor_calibrate_imu();
 int sensor_get_pitch(PitchMeasurement &out);
+float sensor_get_yaw_rate(float pitch_deg);
+int sensor_poll_imu();
 WheelState sensor_get_wheels();
 void sensor_reset_position();
 

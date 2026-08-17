@@ -70,7 +70,8 @@ static volatile uint8_t prev_state_a = 0, prev_state_b = 0;
 static volatile uint32_t last_tick_a = 0, last_tick_b = 0;
 static volatile uint32_t prev_delta_a = 0, prev_delta_b = 0;
 
-Vec3 gyro_cal{};
+static Vec3 gyro_cal{};
+static Vec3 gyr_raw{}, acc_raw{};
 static float accel_norm_rest = 1.0f;  // resting |accel| measured at calibration; absorbs the accel's static offset/scale error
 static float accel_dev_floor = 0.0f;  // 3 sigma of resting |accel| noise; deviations below this are indistinguishable from noise
 
@@ -390,7 +391,7 @@ static void write_imu_reg(uint8_t addr, uint8_t reg, uint8_t val) {
 
 int init_imu() {
     if (!IMU.begin()) return 0;
-
+    Wire1.setClock(400000);
     write_imu_reg(0x6B, 0x10, 0xB8);  // CTRL_REG1_G: ODR=101 (476Hz), FS=2000dps, BW=00
     write_imu_reg(0x6B, 0x20, 0xB0);  // CTRL_REG6_XL: ODR=101 (476Hz), FS=4g
 
@@ -452,30 +453,34 @@ int get_raw_accel(Vec3 &out) {
     return 1;
 }
 
+int sensor_poll_imu() {
+    if (get_raw_gyro(gyr_raw)) return 1;
+    if (get_raw_accel(acc_raw)) return 1;
+    return 0;
+}
 
 void sensor_reset_position() {
     enc_count_a = 0;
     enc_count_b = 0;
 }
 
-// Pitch measurement for the Kalman filter, pre-converted to filter units
-// (degrees / deg/s) so H stays linear and trivial. Sign convention matches
-// the complementary filter above: positive rate = increasing accel angle.
 int sensor_get_pitch(PitchMeasurement &out) {
-    Vec3 gyr, acc;
-    if (get_raw_gyro(gyr)) return 1;
-    if (get_raw_accel(acc)) return 1;
-    out.angle = atan2f(acc.y, acc.z) * 180.0f / PI;
-    out.rate = -(gyr.x - gyro_cal.x);
+    out.angle = atan2f(acc_raw.y, acc_raw.z) * 180.0f / PI;
+    out.rate = -(gyr_raw.x - gyro_cal.x);
     // How far the total accel is from pure gravity = how hard `angle` is lying
     // right now. The measured noise floor is subtracted so plain sensor noise
     // reads as 0 and the filter keeps full baseline accel trust at rest.
-    float norm = sqrtf(acc.x*acc.x + acc.y*acc.y + acc.z*acc.z);
+    float norm = sqrtf(acc_raw.x*acc_raw.x + acc_raw.y*acc_raw.y + acc_raw.z*acc_raw.z);
     float dev = fabsf(norm - accel_norm_rest) - accel_dev_floor;
     out.accel_dev = dev > 0.0f ? dev : 0.0f;
     return 0;
 }
 
+float sensor_get_yaw_rate(float pitch_deg) {
+    float t = pitch_deg * PI / 180.f;
+    return (gyr_raw.y - gyro_cal.y) * sinf(t)
+         + (gyr_raw.z - gyro_cal.z) * cosf(t);
+}
 
 int sensor_calibrate_imu() {
     float sum[3] = {0,0,0};
