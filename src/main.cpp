@@ -20,7 +20,9 @@ void setup()
         .set_speed_gains = set_speed_gains,
         .get_speed_gains = get_speed_gains,
         .set_pos_gains = set_pos_gains,
-        .get_pos_gains = get_pos_gains
+        .get_pos_gains = get_pos_gains,
+        .set_turn_gains = set_turn_gains,
+        .get_turn_gains = get_turn_gains,
     });
 
     init_ble(); 
@@ -75,6 +77,8 @@ void loop()
             snap.effort_duty,
             wheel_state.speed.avg_speed(),
             snap.motor_a_duty,
+            snap.motor_b_duty,
+            snap.turning_duty,
             snap.battery_voltage,
             snap.motors_enabled ? 1.0f : 0.0f,
             (float)snap.overruns

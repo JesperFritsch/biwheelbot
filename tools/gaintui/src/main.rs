@@ -163,6 +163,9 @@ struct App {
     status: String,
     label_w: usize,
     telem: Option<Telem>,
+    /// First visible line of the gains pane. Owned by the draw code, which is
+    /// the only place the viewport height is known.
+    scroll: u16,
 }
 
 impl App {
@@ -182,6 +185,7 @@ impl App {
             status: String::new(),
             label_w,
             telem: None,
+            scroll: 0,
         }
     }
 
@@ -418,7 +422,7 @@ fn telem_lines(t: &Telem) -> Vec<Line<'static>> {
     lines
 }
 
-fn ui(f: &mut Frame, app: &App) {
+fn ui(f: &mut Frame, app: &mut App) {
     // The telemetry pane sizes itself to the discovered field count: one row
     // per TELEM_COLS fields, plus a header line and the block borders.
     let telem_h = match &app.telem {
@@ -442,6 +446,7 @@ fn ui(f: &mut Frame, app: &App) {
 
     let mut lines: Vec<Line> = Vec::new();
     let mut prev_group: Option<usize> = None;
+    let mut sel_line = 0usize;
 
     for i in 0..app.rows.len() {
         let (gi, _) = app.rows[i];
@@ -451,6 +456,9 @@ fn ui(f: &mut Frame, app: &App) {
         prev_group = Some(gi);
 
         let selected = i == app.sel;
+        if selected {
+            sel_line = lines.len();
+        }
         let marker = if selected { " > " } else { "   " };
         let value = format!("{:>14.6}", app.get(i));
         // A block with every gain at zero is disabled; dim it so the active
@@ -475,8 +483,32 @@ fn ui(f: &mut Frame, app: &App) {
         )]));
     }
 
+    // The pane is a fixed viewport onto a list that grows with whatever the
+    // firmware advertises, so scroll only as far as it takes to keep the
+    // selection visible -- the surrounding rows stay put between keypresses.
+    let view_h = (chunks[1].height.saturating_sub(2)).max(1) as usize;
+    let max_scroll = lines.len().saturating_sub(view_h);
+    let mut scroll = (app.scroll as usize).min(max_scroll);
+    if sel_line < scroll {
+        scroll = sel_line;
+    } else if sel_line >= scroll + view_h {
+        scroll = sel_line + 1 - view_h;
+    }
+    app.scroll = scroll as u16;
+
+    let title = match (scroll > 0, scroll + view_h < lines.len()) {
+        (false, false) => " gains ".to_string(),
+        (above, below) => format!(
+            " gains {}{} ",
+            if above { "^" } else { " " },
+            if below { "v" } else { " " }
+        ),
+    };
+
     f.render_widget(
-        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" gains ")),
+        Paragraph::new(lines)
+            .scroll((app.scroll, 0))
+            .block(Block::default().borders(Borders::ALL).title(title)),
         chunks[1],
     );
 

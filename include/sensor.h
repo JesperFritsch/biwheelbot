@@ -7,10 +7,6 @@ constexpr float V_BATT_SCALE = 0.003429327f;
 
 constexpr float GYRO_STDDEV = 1.0f; // standard deviation threshold, if lower than this then the bot is completely still.
 
-constexpr float WHEEL_CIRCUM_MM = 226.0f;
-constexpr float COUNTS_PER_REV = 425.0f;
-constexpr float MM_PER_COUNT = WHEEL_CIRCUM_MM / COUNTS_PER_REV;
-
 // The encoders' edge geometry repeats every 44 counts -- one motor revolution,
 // 11 pole pairs x 4 quadrature edges. Measured, not assumed; see
 // docs/encoder-calibration.md for the method and the numbers.

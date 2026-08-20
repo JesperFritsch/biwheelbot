@@ -30,6 +30,8 @@ static MotorState motor_state = MotorState::OFF;
 static float v_batt = 0.0f;
 static uint32_t cycles_batt = 0;
 static WheelPosition t_pos{};
+static WheelPosition last_position{};
+static float t_wheel_diff_mm = 0.0f;
 static uint32_t timestamp;
 
 static ComplementaryFilter comp(0.97f);   // tau = 162 ms at the 5 ms tick
@@ -57,29 +59,32 @@ static volatile PIDGains angle_to_duty = {
 };
 
 static volatile PIDGains pos_to_turn = {
-    kp: 0,
+    kp: 0.1,
     ki: 0,
-    kd: 0
+    kd: 0.0001
 };
 
-static volatile PIDGains turn_rate = {
-    kp: 0,
-    ki: 0,
-    kd: 0
-};
 
 void reset_position() {
     sensor_reset_position();
     t_pos = sensor_get_wheels().position;
+    t_wheel_diff_mm = t_pos.pos_diff_mm();
+}
+
+// returns the adjustign duty for turning (a, b)
+std::pair<float, float> assign_turn_duty(float base_duty, float turn_duty) {
+    float real_t_d = turn_duty * (1 - base_duty);
+    return std::pair<float, float>(base_duty + real_t_d, base_duty - real_t_d);
 }
 
 static void control_loop() {
     auto next = rtos::Kernel::Clock::now();
     auto pos_pid = PIDController(pos_to_speed, MAX_SPEED);
     auto speed_pid = PIDController(speed_to_angle, MAX_ANGLE);
-    auto duty_pid = PIDController(angle_to_duty);
-    auto pos_turn_pid = PIDController(pos_to_turn);
-    auto turn_pid = PIDController(turn_rate);
+    auto duty_pid = PIDController(angle_to_duty, 1.0f);
+
+    auto pos_turn_pid = PIDController(pos_to_turn, 1.0f);
+
     auto pos_speed_lp = LowPassFilter(pos_speed_lp_steps);
     auto speed_angle_lp = LowPassFilter(speed_angle_lp_steps);
 
@@ -114,29 +119,41 @@ static void control_loop() {
 
         auto new_motor_state = safety_update(est_angle, est_rate, v_batt, consecutive_imu_misses);
         auto w_state = sensor_get_wheels();
+        auto curr_pos = w_state.position;
         auto w_speed = w_state.speed.avg_speed();
 
         if (new_motor_state == MotorState::OFF) {
             set_motors_enabled(false);
+            reset_position();
         }
         else if (new_motor_state == MotorState::ON && motor_state == MotorState::OFF) {
-            set_motors_enabled(true);
             reset_position();
+            set_motors_enabled(true);
         }
 
         motor_state = new_motor_state;
 
-        float pos_mm = w_state.position.avg_pos() * MM_PER_COUNT;
-        float t_mm = t_pos.avg_pos() * MM_PER_COUNT;
+        float pos_mm = curr_pos.avg_pos_mm();
+        float t_mm = t_pos.avg_pos_mm();
         // TODO implement commanded speed
+        // balancing pids
         auto target_speed = pos_speed_lp.update(pos_pid.update(pos_mm, t_mm, passed_time_s));
         auto target_angle = speed_angle_lp.update(speed_pid.update(w_speed, target_speed, passed_time_s));
         auto effort_duty = -duty_pid.update(est_angle, target_angle, passed_time_s);
 
-        auto true_duty = ff_duty(effort_duty);
-        
-        motor_set_a(true_duty);
-        motor_set_b(true_duty);
+        // turning pids
+        auto a_b_diff_d = last_position.pos_diff_mm() - curr_pos.pos_diff_mm();
+        auto turn_duty = pos_turn_pid.update(curr_pos.pos_diff_mm(), t_pos.pos_diff_mm(), passed_time_s);
+        auto assigned_duties = assign_turn_duty(effort_duty, turn_duty);
+        auto e_duty_a = assigned_duties.first;
+        auto e_duty_b = assigned_duties.second;
+        auto true_duty_a = ff_duty(e_duty_a);
+        auto true_duty_b = ff_duty(e_duty_b);
+        last_position = curr_pos;
+
+        motor_set_a(true_duty_a);
+        motor_set_b(true_duty_b);
+
 
         {
             rtos::ScopedMutexLock lock(snap_mutex);
@@ -146,12 +163,13 @@ static void control_loop() {
                 .kf_angle = kf.x[0],
                 .comp_angle = comp.value(),
                 .battery_voltage = v_batt,
-                .turning_duty = 0.0f, // TODO: implement turning control
+                .turning_duty = turn_duty, // TODO: implement turning control
                 .effort_duty = effort_duty,
                 .target_angle = target_angle,
                 .target_speed = target_speed,
-                .motor_a_duty = true_duty,
-                .motor_b_duty = true_duty,
+                .ab_diff_drift = a_b_diff_d,
+                .motor_a_duty = true_duty_a,
+                .motor_b_duty = true_duty_b,
                 .motors_enabled = (motor_state == MotorState::ON),
                 .t_pos_mm = t_mm,
                 .pos_mm = pos_mm,
@@ -203,6 +221,12 @@ void set_pos_gains(PIDGains gains) {
     pos_to_speed.kd = gains.kd;
 };
 
+void set_turn_gains(PIDGains gains) {
+    pos_to_turn.kp = gains.kp;
+    pos_to_turn.ki = gains.ki;
+    pos_to_turn.kd = gains.kd;
+};
+
 PIDGains get_balance_gains() {
     return {
         angle_to_duty.kp, 
@@ -227,3 +251,10 @@ PIDGains get_pos_gains() {
     };
 };
 
+PIDGains get_turn_gains() {
+    return {
+        pos_to_turn.kp,
+        pos_to_turn.ki,
+        pos_to_turn.kd
+    };
+};

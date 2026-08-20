@@ -47,6 +47,9 @@ BLEDescriptor speedDesc("2901", "speed:kp,ki,kd");
 BLECharacteristic posPIDGains("19b10005-e8f2-537e-4f6c-d104768a1214", BLEWrite | BLERead, 12);
 BLEDescriptor posDesc("2901", "position:kp,ki,kd");
 
+BLECharacteristic turnPIDGains("19b10006-e8f2-537e-4f6c-d104768a1214", BLEWrite | BLERead, 12);
+BLEDescriptor turnDesc("2901", "turn:kp,ki,kd");
+
 // Telemetry lives in its own service: gaintui treats every 0x2901-carrying
 // characteristic in configService as an editable gain block, and this one is
 // neither editable nor three floats.
@@ -57,7 +60,7 @@ BLEService telemetryService("19b10006-e8f2-537e-4f6c-d104768a1214");
 // wire format carries no field identifiers, only the schema does.
 BLECharacteristic telemetryChar("19b10007-e8f2-537e-4f6c-d104768a1214",
                                 BLERead | BLENotify, TELEM_FIELDS * sizeof(float));
-BLEDescriptor telemetryDesc("2901", "telem:ang,rate,kfa,cmp,tpos,pos,tang,tspd,eff,spd,duty,bat,en,ovr");
+BLEDescriptor telemetryDesc("2901", "telem:ang,rate,kfa,cmp,tpos,pos,tang,tspd,eff,spd,d_a,d_b,t_d,bat,en,ovr");
 
 static ComHooks com_hooks = {};
 
@@ -94,6 +97,8 @@ void on_char_written(BLEDevice central, BLECharacteristic ch) {
         // ignore, handled in on_cmd_written
     } else if (strcmp(ch.uuid(), posPIDGains.uuid()) == 0) {
         if (com_hooks.set_pos_gains) com_hooks.set_pos_gains(gains);
+    } else if (strcmp(ch.uuid(), turnPIDGains.uuid()) == 0) {
+        if (com_hooks.set_turn_gains) com_hooks.set_turn_gains(gains);
     }
 }
 
@@ -111,6 +116,11 @@ void on_char_read(BLEDevice central, BLECharacteristic ch) {
     } else if (strcmp(ch.uuid(), posPIDGains.uuid()) == 0) {
         if (com_hooks.get_pos_gains) {
             PIDGains gains = com_hooks.get_pos_gains();
+            ch.writeValue((uint8_t*)&gains, sizeof(gains));
+        }
+    } else if (strcmp(ch.uuid(), turnPIDGains.uuid()) == 0) {
+        if (com_hooks.get_turn_gains) {
+            PIDGains gains = com_hooks.get_turn_gains();
             ch.writeValue((uint8_t*)&gains, sizeof(gains));
         }
     }
@@ -135,12 +145,15 @@ void init_ble() {
     balancePIDGains.addDescriptor(balanceDesc);
     speedPIDGains.addDescriptor(speedDesc);
     posPIDGains.addDescriptor(posDesc);
+    turnPIDGains.addDescriptor(turnDesc);
     telemetryChar.addDescriptor(telemetryDesc);
 
     cmdService.addCharacteristic(cmdChar);
     configService.addCharacteristic(balancePIDGains);
     configService.addCharacteristic(speedPIDGains);
     configService.addCharacteristic(posPIDGains);
+    configService.addCharacteristic(turnPIDGains);
+
     telemetryService.addCharacteristic(telemetryChar);
 
     BLE.addService(cmdService);
@@ -150,12 +163,15 @@ void init_ble() {
     balancePIDGains.setEventHandler(BLEWritten, on_char_written);
     speedPIDGains.setEventHandler(BLEWritten, on_char_written);
     posPIDGains.setEventHandler(BLEWritten, on_char_written);
+    turnPIDGains.setEventHandler(BLEWritten, on_char_written);
     balancePIDGains.setEventHandler(BLERead, on_char_read);
     speedPIDGains.setEventHandler(BLERead, on_char_read);
     posPIDGains.setEventHandler(BLERead, on_char_read);
+    turnPIDGains.setEventHandler(BLERead, on_char_read);
     seed_char(balancePIDGains);
     seed_char(speedPIDGains);
     seed_char(posPIDGains);
+    seed_char(turnPIDGains);
     // A zero-length value makes a read fail with INVALID_OFFSET before the
     // handler ever runs, so every readable characteristic needs a first value.
     seed_char(telemetryChar);

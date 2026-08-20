@@ -3,7 +3,9 @@
 // #include <mbed.h>
 #include "Arduino.h"
 
-#define SYM_CAP(val, lim) MIN(MAX(val, -lim), lim)
+constexpr float sym_cap(float val, float lim) {
+    return val > lim ? lim : (val < -lim ? -lim : val);
+}
 
 inline bool ms_period(uint32_t period_ms, uint32_t &timestamp) {
   uint32_t current = millis();

@@ -28,7 +28,7 @@ public:
         prev_error = error;
         float result = gains.kp * error + gains.ki * integral + gains.kd * derivative;
         e_is_neg = error < 0;
-        return SYM_CAP(result, limit);
+        return sym_cap(result, limit);
     } 
 private:
     const volatile PIDGains& gains;
@@ -51,6 +51,7 @@ struct ControlSnapshot {
     float effort_duty;
     float target_angle;
     float target_speed;
+    float ab_diff_drift;
     float motor_a_duty;
     float motor_b_duty;
     bool motors_enabled;
@@ -62,8 +63,10 @@ struct ControlSnapshot {
 void control_start();
 ControlSnapshot control_get_snapshot();
 void set_balance_gains(PIDGains gains);
-void set_speed_gains(PIDGains gains);
 PIDGains get_balance_gains();
+void set_speed_gains(PIDGains gains);
 PIDGains get_speed_gains();
 void set_pos_gains(PIDGains gains);
 PIDGains get_pos_gains();
+void set_turn_gains(PIDGains gains);
+PIDGains get_turn_gains();
