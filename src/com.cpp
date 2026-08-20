@@ -11,11 +11,13 @@
 
 static const uint8_t ZEROS[512] = {0};
 
-uint32_t lastCmdMs = 0;
-
-
-struct Target { int8_t linear; int8_t angular; uint8_t flags; uint8_t seq; };
-Target target = {0, 0, 0, 0};
+// The only advertised service, and deliberately empty: it exists to be an
+// identity token, not to carry data. An advertising packet has room for exactly
+// one 128-bit UUID, so advertising a functional service would mean picking a
+// favourite among cmd/gains/telemetry and quietly dropping the rest -- and the
+// host's scan filter would then have to change every time the service layout
+// did. This UUID never changes; everything behind it is free to.
+BLEService idService("19b1000a-e8f2-537e-4f6c-d104768a1214");
 
 BLEService cmdService("19b10000-e8f2-537e-4f6c-d104768a1214");
 BLEService gainsService("19b10002-e8f2-537e-4f6c-d104768a1214");
@@ -83,6 +85,26 @@ bool decode_gains(BLECharacteristic &ch, PIDGains &gains) {
     return true;
 }
 
+bool decode_drive_cmd(BLECharacteristic &ch, DriveCmd &cmd) {
+    if (ch.valueLength() != 4) return false;
+    uint8_t v[4];
+    memcpy(v, ch.value(), 4);
+    cmd.linear = v[0];
+    cmd.angular = v[1];
+    cmd.flags = v[2];
+    cmd.seq = v[3];
+    return true;
+}
+
+void on_drive_written(BLEDevice central, BLECharacteristic ch) {
+    DriveCmd cmd;
+    if (!decode_drive_cmd(ch, cmd)) return;
+    Serial.println(cmd.linear);
+    if (!com_hooks.set_drive) return;
+    Serial.println("setting drive");
+    com_hooks.set_drive(cmd);
+}
+
 // The handler receives a BLECharacteristic by value -- a fresh wrapper around
 // the same BLELocalCharacteristic -- so the UUID string is the identity we have
 // to match on.
@@ -115,11 +137,11 @@ void init_ble() {
 
     if (!BLE.begin()) { while (1); }
     BLE.setLocalName(DEVICE_NAME);
-    BLE.setAdvertisedService(cmdService);
-    BLE.setAdvertisedService(gainsService);
-    // Telemetry is deliberately not advertised -- an advertising packet holds
-    // only one 128-bit UUID anyway, and gaintui matches on the device name and
-    // then discovers every service over the connection.
+    // setAdvertisedService is a setter, not an append: only the last call
+    // survives. Nothing but idService is advertised, and nothing needs to be --
+    // a central connects on the identity match and then discovers cmd, gains
+    // and telemetry over the connection.
+    BLE.setAdvertisedService(idService);
 
     // Descriptors and characteristics must be attached before addService():
     // GATT flattens the service into a handle table at that point and never
@@ -133,9 +155,16 @@ void init_ble() {
     cmdService.addCharacteristic(cmdChar);
     telemetryService.addCharacteristic(telemetryChar);
 
+    // Registered with no characteristics so the advertisement is not lying:
+    // a central that connects and walks the GATT table actually finds the
+    // service it matched on.
+    BLE.addService(idService);
+
     BLE.addService(cmdService);
     BLE.addService(gainsService);
     BLE.addService(telemetryService);
+
+    cmdChar.setEventHandler(BLEWritten, on_drive_written);
 
     for (auto& g : gain_chars) {
         g.ch.setEventHandler(BLEWritten, on_gain_char_written);

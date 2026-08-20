@@ -72,3 +72,4 @@ ControlSnapshot control_get_snapshot();
 // old and new terms. Out-of-range ids are ignored.
 void control_set_gains(GainId id, PIDGains gains);
 PIDGains control_get_gains(GainId id);
+void control_set_drive(DriveCmd cmd);

@@ -1,5 +1,5 @@
 # ---- Rust ----
-controller/target/
+**/target/
 **/*.rs.bk
 *.pdb
 

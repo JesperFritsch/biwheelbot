@@ -1,6 +1,7 @@
 #include "control.h"
 
 #include <mbed.h>
+#include <atomic>
 #include "hal/us_ticker_api.h"
 #include "platform/mbed_critical.h"
 #include "safety.h"
@@ -12,6 +13,16 @@
 #include "motor_ff.h"
 
 using namespace std::chrono_literals;
+
+
+static_assert(sizeof(DriveCmd) == 4, "drive command must fit one word");
+// std::atomic<T>::is_always_lock_free would say this more directly, but it is
+// C++17 and the mbed core builds at gnu++14. The builtin is equivalent and
+// standard-agnostic; the 0 means "assume natural alignment".
+static_assert(__atomic_always_lock_free(sizeof(DriveCmd), 0),
+              "drive slot must stay lock-free: past one word std::atomic falls "
+              "back to a library lock, which would put a hidden mutex on this "
+              "thread's hot path");
 
 static const float pos_speed_lp_steps = 10;
 static const float speed_angle_lp_steps = 20;
@@ -40,6 +51,7 @@ static volatile bool use_complementary = false;
 
 static const float MAX_SPEED = 1200.0f;
 static const float MAX_ANGLE = 45.f;
+// static const float MAX_TURN = 
 
 // Gains live in two copies. `gains_shared` is the retune target, written by
 // whichever thread runs the BLE stack; `gains_live` is private to the control
@@ -59,6 +71,9 @@ static volatile PIDGains gains_shared[GAIN_COUNT] = {
 static volatile bool gains_dirty = true;   // forces the first refresh to seed gains_live
 static PIDGains gains_live[GAIN_COUNT];
 
+static std::atomic<DriveCmd> drive_slot{DriveCmd{}};
+
+
 // Pull any pending retune into the control thread's copy. Called once per tick,
 // before the PIDs run, and once from control_start() to seed the defaults.
 static void gains_refresh() {
@@ -72,7 +87,6 @@ static void gains_refresh() {
     gains_dirty = false;
     core_util_critical_section_exit();
 }
-
 
 void reset_position() {
     sensor_reset_position();
@@ -99,8 +113,23 @@ static void control_loop() {
     auto pos_speed_lp = LowPassFilter(pos_speed_lp_steps);
     auto speed_angle_lp = LowPassFilter(speed_angle_lp_steps);
 
+    uint8_t last_cmd_seq = 0;
+    uint32_t drive_stale = 0;
+
     while (true) {
         gains_refresh();
+
+        DriveCmd cmd = drive_slot.load(std::memory_order_relaxed);
+        if (cmd.seq != last_cmd_seq) {
+            last_cmd_seq = cmd.seq;
+            drive_stale = 0;
+        } else if (++drive_stale > SAFETY_DRIVE_STALE_TICKS) {
+            cmd = DriveCmd{};
+        }
+
+        float cmd_drive = cmd.linear / 127.0f;
+        float cmd_turn = cmd.angular / 127.0f;
+
         auto current_time = us_ticker_read();
         auto passed_time = (current_time - timestamp);
         auto passed_time_s = passed_time / 1000000.f;
@@ -150,6 +179,9 @@ static void control_loop() {
         // TODO implement commanded speed
         // balancing pids
         auto target_speed = pos_speed_lp.update(pos_pid.update(pos_mm, t_mm, passed_time_s));
+        if (cmd_drive != 0) {
+            target_speed = cmd_drive * MAX_SPEED;
+        }
         auto target_angle = speed_angle_lp.update(speed_pid.update(w_speed, target_speed, passed_time_s));
         auto effort_duty = -duty_pid.update(est_angle, target_angle, passed_time_s);
 
@@ -240,4 +272,8 @@ PIDGains control_get_gains(GainId id) {
     };
     core_util_critical_section_exit();
     return gains;
+}
+
+void control_set_drive(DriveCmd cmd) {
+    drive_slot.store(cmd, std::memory_order_relaxed);
 }

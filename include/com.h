@@ -4,6 +4,7 @@
 struct ComHooks {
     void (*set_gains)(GainId, PIDGains);
     PIDGains (*get_gains)(GainId);
+    void (*set_drive)(DriveCmd);
 };
 
 // Number of f32 in one telemetry packet. Must match the field count in the

@@ -17,6 +17,7 @@ void setup()
     com_set_hooks({
         .set_gains = control_set_gains,
         .get_gains = control_get_gains,
+        .set_drive = control_set_drive
     });
 
     init_ble(); 

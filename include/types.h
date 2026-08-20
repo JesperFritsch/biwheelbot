@@ -44,6 +44,13 @@ struct PIDGains {
     float kd;
 };
 
+struct DriveCmd { 
+    int8_t linear; // drive 
+    int8_t angular; // turn
+    uint8_t flags; 
+    uint8_t seq;
+};
+
 // Identifies one tunable PID block. Every layer that carries gains around --
 // the control loop's defaults table, the BLE characteristic table, the hooks --
 // is indexed by this, so adding a loop means adding one row to each and the

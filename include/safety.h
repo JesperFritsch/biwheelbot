@@ -3,6 +3,8 @@
 #include <math.h>
 #include <stdint.h>
 
+const float SAFETY_DRIVE_STALE_TICKS = 40; // balance loop is 200Hz timeout should be 200ms
+
 enum class MotorState {
    OFF,
    ON
