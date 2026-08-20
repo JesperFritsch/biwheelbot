@@ -5,7 +5,11 @@
 
 class PIDController {
 public:
-    PIDController(const volatile PIDGains& gains, float limit=infinity(), float i_cap=infinity(), bool i_snapback=true) : 
+    // `gains` is held by reference so a mid-run retune takes effect on the next
+    // update() -- it must outlive the controller, and must not be written
+    // concurrently. control.cpp satisfies both with a control-thread-private
+    // copy that is refreshed only at a tick boundary.
+    PIDController(const PIDGains& gains, float limit=infinity(), float i_cap=infinity(), bool i_snapback=true) :
         gains(gains), 
         integral(0.0f), 
         prev_error(0.0f), 
@@ -31,7 +35,7 @@ public:
         return sym_cap(result, limit);
     } 
 private:
-    const volatile PIDGains& gains;
+    const PIDGains& gains;
     float integral;
     float prev_error;
     float limit;
@@ -62,11 +66,9 @@ struct ControlSnapshot {
 
 void control_start();
 ControlSnapshot control_get_snapshot();
-void set_balance_gains(PIDGains gains);
-PIDGains get_balance_gains();
-void set_speed_gains(PIDGains gains);
-PIDGains get_speed_gains();
-void set_pos_gains(PIDGains gains);
-PIDGains get_pos_gains();
-void set_turn_gains(PIDGains gains);
-PIDGains get_turn_gains();
+
+// Retune one PID block from another thread. The write is atomic against the
+// control loop: it either sees the whole triple or none of it, never a mix of
+// old and new terms. Out-of-range ids are ignored.
+void control_set_gains(GainId id, PIDGains gains);
+PIDGains control_get_gains(GainId id);

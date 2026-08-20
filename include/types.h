@@ -44,3 +44,15 @@ struct PIDGains {
     float kd;
 };
 
+// Identifies one tunable PID block. Every layer that carries gains around --
+// the control loop's defaults table, the BLE characteristic table, the hooks --
+// is indexed by this, so adding a loop means adding one row to each and the
+// compiler finds the ones you missed.
+enum GainId : uint8_t {
+    GAIN_BALANCE,   // angle -> duty
+    GAIN_SPEED,     // speed -> angle
+    GAIN_POS,       // position -> speed
+    GAIN_TURN,      // wheel difference -> turn duty
+    GAIN_COUNT
+};
+

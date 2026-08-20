@@ -46,7 +46,7 @@ const DEVICE_NAME: &str = "BiWheelBot";
 /// The one UUID still hardcoded, and deliberately: it is the anchor that says
 /// which characteristics are gains. Discovering everything instead would sweep
 /// up cmdChar and try to render it as a PID.
-const CONFIG_SVC: Uuid = uuid!("19b10002-e8f2-537e-4f6c-d104768a1214");
+const GAINS_SVC: Uuid = uuid!("19b10002-e8f2-537e-4f6c-d104768a1214");
 
 /// Telemetry sits in its own service so the gain discovery above can't mistake
 /// it for an editable PID block.
@@ -346,7 +346,7 @@ async fn discover(p: &Peripheral) -> Result<(Vec<Group>, Vec<String>)> {
     let mut chars: Vec<Characteristic> = p
         .characteristics()
         .into_iter()
-        .filter(|c| c.service_uuid == CONFIG_SVC)
+        .filter(|c| c.service_uuid == GAINS_SVC)
         .collect();
     // BTreeSet order is already by UUID, but the display order is user-facing.
     chars.sort_by_key(|c| c.uuid);
@@ -548,7 +548,7 @@ async fn main() -> Result<()> {
     if groups.is_empty() {
         peripheral.disconnect().await.ok();
         return Err(anyhow!(
-            "no gain characteristics found in service {CONFIG_SVC}{}",
+            "no gain characteristics found in service {GAINS_SVC}{}",
             if skipped.is_empty() {
                 String::new()
             } else {

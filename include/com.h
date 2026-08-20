@@ -2,14 +2,8 @@
 #include "types.h"
 
 struct ComHooks {
-    void (*set_balance_gains)(PIDGains);
-    PIDGains (*get_balance_gains)();
-    void (*set_speed_gains)(PIDGains);
-    PIDGains (*get_speed_gains)();
-    void (*set_pos_gains)(PIDGains);
-    PIDGains (*get_pos_gains)();
-    void (*set_turn_gains)(PIDGains);
-    PIDGains (*get_turn_gains)();
+    void (*set_gains)(GainId, PIDGains);
+    PIDGains (*get_gains)(GainId);
 };
 
 // Number of f32 in one telemetry packet. Must match the field count in the

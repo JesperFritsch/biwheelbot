@@ -2,6 +2,7 @@
 
 #include <mbed.h>
 #include "hal/us_ticker_api.h"
+#include "platform/mbed_critical.h"
 #include "safety.h"
 #include "types.h"
 #include "sensor.h"
@@ -40,29 +41,37 @@ static volatile bool use_complementary = false;
 static const float MAX_SPEED = 1200.0f;
 static const float MAX_ANGLE = 45.f;
 
-static volatile PIDGains pos_to_speed = { 
-    kp: 1.351516f,
-    ki: 0.000777f, // 20 after windup implemented
-    kd: 0.623395f// 0.0002f
+// Gains live in two copies. `gains_shared` is the retune target, written by
+// whichever thread runs the BLE stack; `gains_live` is private to the control
+// thread and is what the PIDControllers hold references to. The loop refreshes
+// live from shared at a tick boundary, so a retune can never land between the
+// kp and kd reads of a single update() -- which at 200 Hz on a balancing robot
+// shows up as a kick that looks like an estimator fault.
+//
+// `gains_dirty` is the handshake: set inside the same critical section as the
+// write, so the loop's steady-state cost is one load and a branch.
+static volatile PIDGains gains_shared[GAIN_COUNT] = {
+    [GAIN_BALANCE] = { .kp = 0.085744f, .ki = 0.0f,      .kd =  0.000912f },
+    [GAIN_SPEED]   = { .kp = 0.013509f, .ki = 0.000188f, .kd = -0.001219f },
+    [GAIN_POS]     = { .kp = 1.351516f, .ki = 0.000777f, .kd =  0.623395f }, // ki 20 after windup implemented
+    [GAIN_TURN]    = { .kp = 0.1f,      .ki = 0.0f,      .kd =  0.0001f   },
 };
+static volatile bool gains_dirty = true;   // forces the first refresh to seed gains_live
+static PIDGains gains_live[GAIN_COUNT];
 
-static volatile PIDGains speed_to_angle = { 
-    kp:  0.013509f,
-    ki:  0.000188f,
-    kd: -0.001219f
-};
-
-static volatile PIDGains angle_to_duty = { 
-    kp: 0.085744f,
-    ki: 0.0f,
-    kd: 0.000912f
-};
-
-static volatile PIDGains pos_to_turn = {
-    kp: 0.1,
-    ki: 0,
-    kd: 0.0001
-};
+// Pull any pending retune into the control thread's copy. Called once per tick,
+// before the PIDs run, and once from control_start() to seed the defaults.
+static void gains_refresh() {
+    if (!gains_dirty) return;
+    core_util_critical_section_enter();
+    for (int i = 0; i < GAIN_COUNT; i++) {
+        gains_live[i].kp = gains_shared[i].kp;
+        gains_live[i].ki = gains_shared[i].ki;
+        gains_live[i].kd = gains_shared[i].kd;
+    }
+    gains_dirty = false;
+    core_util_critical_section_exit();
+}
 
 
 void reset_position() {
@@ -79,16 +88,19 @@ std::pair<float, float> assign_turn_duty(float base_duty, float turn_duty) {
 
 static void control_loop() {
     auto next = rtos::Kernel::Clock::now();
-    auto pos_pid = PIDController(pos_to_speed, MAX_SPEED);
-    auto speed_pid = PIDController(speed_to_angle, MAX_ANGLE);
-    auto duty_pid = PIDController(angle_to_duty, 1.0f);
+    // controllers for balancing
+    auto pos_pid = PIDController(gains_live[GAIN_POS], MAX_SPEED);
+    auto speed_pid = PIDController(gains_live[GAIN_SPEED], MAX_ANGLE);
+    auto duty_pid = PIDController(gains_live[GAIN_BALANCE], 1.0f);
 
-    auto pos_turn_pid = PIDController(pos_to_turn, 1.0f);
+    // controllers for turning
+    auto pos_turn_pid = PIDController(gains_live[GAIN_TURN], 1.0f);
 
     auto pos_speed_lp = LowPassFilter(pos_speed_lp_steps);
     auto speed_angle_lp = LowPassFilter(speed_angle_lp_steps);
 
     while (true) {
+        gains_refresh();
         auto current_time = us_ticker_read();
         auto passed_time = (current_time - timestamp);
         auto passed_time_s = passed_time / 1000000.f;
@@ -188,6 +200,8 @@ static void control_loop() {
 }
 
 void control_start() {
+    // Seed gains_live before the PIDControllers bind references to it.
+    gains_refresh();
 
     PitchMeasurement m0;
     while (sensor_get_pitch(m0)) {}
@@ -203,58 +217,27 @@ ControlSnapshot control_get_snapshot() {
     return snap;
 }
 
-void set_balance_gains(PIDGains gains) {
-    angle_to_duty.kp = gains.kp;
-    angle_to_duty.ki = gains.ki;
-    angle_to_duty.kd = gains.kd;
-};
+// Field-wise rather than a struct copy: assigning a whole volatile struct is
+// ill-formed, the implicit copy-assignment operator does not accept a volatile
+// operand.
+void control_set_gains(GainId id, PIDGains gains) {
+    if (id >= GAIN_COUNT) return;
+    core_util_critical_section_enter();
+    gains_shared[id].kp = gains.kp;
+    gains_shared[id].ki = gains.ki;
+    gains_shared[id].kd = gains.kd;
+    gains_dirty = true;
+    core_util_critical_section_exit();
+}
 
-void set_speed_gains(PIDGains gains) {
-    speed_to_angle.kp = gains.kp;
-    speed_to_angle.ki = gains.ki;
-    speed_to_angle.kd = gains.kd;
-};
-
-void set_pos_gains(PIDGains gains) {
-    pos_to_speed.kp = gains.kp;
-    pos_to_speed.ki = gains.ki;
-    pos_to_speed.kd = gains.kd;
-};
-
-void set_turn_gains(PIDGains gains) {
-    pos_to_turn.kp = gains.kp;
-    pos_to_turn.ki = gains.ki;
-    pos_to_turn.kd = gains.kd;
-};
-
-PIDGains get_balance_gains() {
-    return {
-        angle_to_duty.kp, 
-        angle_to_duty.ki, 
-        angle_to_duty.kd
+PIDGains control_get_gains(GainId id) {
+    if (id >= GAIN_COUNT) return { 0.0f, 0.0f, 0.0f };
+    core_util_critical_section_enter();
+    PIDGains gains = {
+        gains_shared[id].kp,
+        gains_shared[id].ki,
+        gains_shared[id].kd
     };
-};
-
-PIDGains get_speed_gains() {
-    return {
-        speed_to_angle.kp, 
-        speed_to_angle.ki, 
-        speed_to_angle.kd
-    };
-};
-
-PIDGains get_pos_gains() {
-    return {
-        pos_to_speed.kp, 
-        pos_to_speed.ki, 
-        pos_to_speed.kd
-    };
-};
-
-PIDGains get_turn_gains() {
-    return {
-        pos_to_turn.kp,
-        pos_to_turn.ki,
-        pos_to_turn.kd
-    };
-};
+    core_util_critical_section_exit();
+    return gains;
+}
