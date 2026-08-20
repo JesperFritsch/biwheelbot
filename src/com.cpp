@@ -87,21 +87,14 @@ bool decode_gains(BLECharacteristic &ch, PIDGains &gains) {
 
 bool decode_drive_cmd(BLECharacteristic &ch, DriveCmd &cmd) {
     if (ch.valueLength() != 4) return false;
-    uint8_t v[4];
-    memcpy(v, ch.value(), 4);
-    cmd.linear = v[0];
-    cmd.angular = v[1];
-    cmd.flags = v[2];
-    cmd.seq = v[3];
+    memcpy(&cmd, ch.value(), 4);
     return true;
 }
 
 void on_drive_written(BLEDevice central, BLECharacteristic ch) {
     DriveCmd cmd;
     if (!decode_drive_cmd(ch, cmd)) return;
-    Serial.println(cmd.linear);
     if (!com_hooks.set_drive) return;
-    Serial.println("setting drive");
     com_hooks.set_drive(cmd);
 }
 
