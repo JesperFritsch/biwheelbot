@@ -1,9 +1,13 @@
 #pragma once
 #include <stdint.h>
+#include <Arduino.h>
 
 constexpr float WHEEL_CIRCUM_MM = 226.0f;
+constexpr float TRACK_W_MM = 155.0f;
 constexpr float COUNTS_PER_REV = 425.0f;
 constexpr float MM_PER_COUNT = WHEEL_CIRCUM_MM / COUNTS_PER_REV;
+constexpr float DEG_PER_MM_DIFF = (180 / PI) / TRACK_W_MM;
+
 
 struct Vec3 {
     float x, y, z;
@@ -22,6 +26,7 @@ struct WheelSpeed {
     float a;
     float b;
     float avg_speed() const { return (a + b) * 0.5f; }
+    float yaw_rate_dps() const { return (a - b) * DEG_PER_MM_DIFF; }
 };
 
 struct WheelPosition {
@@ -31,6 +36,7 @@ struct WheelPosition {
     int32_t pos_diff() const { return a - b; }
     float avg_pos_mm() const { return avg_pos() * MM_PER_COUNT; }
     float pos_diff_mm() const { return pos_diff() * MM_PER_COUNT; }
+    float yaw_deg() const { return pos_diff_mm() * DEG_PER_MM_DIFF; }
 };
 
 struct WheelState {

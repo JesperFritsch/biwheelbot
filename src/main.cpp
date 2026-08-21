@@ -48,7 +48,6 @@ void loop()
             snap.angle,
             snap.rate,
             snap.kf_angle,
-            snap.comp_angle,
             snap.t_pos_mm,
             snap.pos_mm,
             snap.target_angle,

@@ -30,28 +30,26 @@ static const float speed_angle_lp_steps = 20;
 // Static stack keeps the allocation out of the heap and makes the footprint
 // visible at link time.
 static unsigned char control_stack[4096] __attribute__((aligned(8)));
-static rtos::Thread control_thread(osPriorityHigh, sizeof(control_stack),
-                                   control_stack, "control");
-
+static rtos::Thread control_thread(osPriorityHigh, sizeof(control_stack), control_stack, "control");
 static rtos::Mutex snap_mutex;
+
 static ControlSnapshot snap;
-static volatile uint32_t overruns = 0, imu_misses = 0, consecutive_imu_misses = 0;
 static KalmanFilter kf;
 static PitchMeasurement m{};
 static MotorState motor_state = MotorState::OFF;
-static float v_batt = 0.0f;
-static uint32_t cycles_batt = 0;
-static WheelPosition t_pos{};
-static WheelPosition last_position{};
-static float t_wheel_diff_mm = 0.0f;
-static uint32_t timestamp;
 
-static ComplementaryFilter comp(0.97f);   // tau = 162 ms at the 5 ms tick
-static volatile bool use_complementary = false;
+static uint32_t timestamp;
+static uint32_t cycles_batt = 0;
+static volatile uint32_t overruns = 0, imu_misses = 0, consecutive_imu_misses = 0;
+static float v_batt = 0.0f;
+static float t_heading_deg = 0;
+static float t_pos_mm = 0;
+static float t_speed = 0;
+static bool pos_reset = false;
 
 static const float MAX_SPEED = 1200.0f;
 static const float MAX_ANGLE = 45.f;
-// static const float MAX_TURN = 
+static const float MAX_TURN_DPS = 360;
 
 // Gains live in two copies. `gains_shared` is the retune target, written by
 // whichever thread runs the BLE stack; `gains_live` is private to the control
@@ -88,10 +86,10 @@ static void gains_refresh() {
     core_util_critical_section_exit();
 }
 
-void reset_position() {
+void reset_position(WheelState state) {
     sensor_reset_position();
-    t_pos = sensor_get_wheels().position;
-    t_wheel_diff_mm = t_pos.pos_diff_mm();
+    t_pos_mm = state.position.avg_pos_mm();
+    t_heading_deg = state.position.yaw_deg();
 }
 
 // returns the adjustign duty for turning (a, b)
@@ -142,14 +140,13 @@ static void control_loop() {
             float R[KF_M];
             kalman_measurement_R(m.accel_dev, m.angle - kf.x[0], R);
             kalman_update(kf, z, R);
-            comp.update(m.angle, m.rate, passed_time_s);
         } else {
             imu_misses++;
             consecutive_imu_misses++;
         }
 
-        float est_angle = use_complementary ? comp.value() : kf.x[0];
-        float est_rate  = use_complementary ? m.rate       : kf.x[1];
+        float est_angle = kf.x[0];
+        float est_rate  = kf.x[1];
         float est_yaw_rate = sensor_get_yaw_rate(est_angle);
 
         cycles_batt++;
@@ -165,39 +162,46 @@ static void control_loop() {
 
         if (new_motor_state == MotorState::OFF) {
             set_motors_enabled(false);
-            reset_position();
         }
         else if (new_motor_state == MotorState::ON && motor_state == MotorState::OFF) {
-            reset_position();
+            reset_position(w_state);
             set_motors_enabled(true);
         }
 
         motor_state = new_motor_state;
 
         float pos_mm = curr_pos.avg_pos_mm();
-        float t_mm = t_pos.avg_pos_mm();
         // TODO implement commanded speed
         // balancing pids
-        auto target_speed = pos_speed_lp.update(pos_pid.update(pos_mm, t_mm, passed_time_s));
-        if (cmd_drive != 0) {
-            target_speed = cmd_drive * MAX_SPEED;
-        }
-        auto target_angle = speed_angle_lp.update(speed_pid.update(w_speed, target_speed, passed_time_s));
-        auto effort_duty = -duty_pid.update(est_angle, target_angle, passed_time_s);
+        t_speed = cmd_drive != 0 ? 
+            cmd_drive * MAX_SPEED : 
+            pos_speed_lp.update(pos_pid.update(pos_mm, t_pos_mm, passed_time_s));
+
+        auto t_angle = speed_angle_lp.update(speed_pid.update(w_speed, t_speed, passed_time_s));
+        auto effort_duty = -duty_pid.update(est_angle, t_angle, passed_time_s);
 
         // turning pids
-        auto a_b_diff_d = last_position.pos_diff_mm() - curr_pos.pos_diff_mm();
-        auto turn_duty = pos_turn_pid.update(curr_pos.pos_diff_mm(), t_pos.pos_diff_mm(), passed_time_s);
+        t_heading_deg = cmd_turn != 0 ? 
+            t_heading_deg + cmd_turn * MAX_TURN_DPS * passed_time_s :
+            t_heading_deg;
+
+        auto turn_duty = pos_turn_pid.update(curr_pos.yaw_deg(), t_heading_deg, passed_time_s);
         auto assigned_duties = assign_turn_duty(effort_duty, turn_duty);
         auto e_duty_a = assigned_duties.first;
         auto e_duty_b = assigned_duties.second;
         auto true_duty_a = ff_duty(e_duty_a);
         auto true_duty_b = ff_duty(e_duty_b);
-        last_position = curr_pos;
 
         motor_set_a(true_duty_a);
         motor_set_b(true_duty_b);
 
+        if (cmd_drive == 0 && cmd_turn == 0 && !pos_reset) {
+            reset_position(w_state);
+            pos_reset = true;
+        }
+        else if (cmd_drive != 0 && cmd_turn != 0) {
+            pos_reset = false;
+        }
 
         {
             rtos::ScopedMutexLock lock(snap_mutex);
@@ -205,17 +209,15 @@ static void control_loop() {
                 .angle = est_angle,
                 .rate = est_rate,
                 .kf_angle = kf.x[0],
-                .comp_angle = comp.value(),
                 .battery_voltage = v_batt,
                 .turning_duty = turn_duty, // TODO: implement turning control
                 .effort_duty = effort_duty,
-                .target_angle = target_angle,
-                .target_speed = target_speed,
-                .ab_diff_drift = a_b_diff_d,
+                .target_angle = t_angle,
+                .target_speed = t_speed,
                 .motor_a_duty = true_duty_a,
                 .motor_b_duty = true_duty_b,
                 .motors_enabled = (motor_state == MotorState::ON),
-                .t_pos_mm = t_mm,
+                .t_pos_mm = t_pos_mm,
                 .pos_mm = pos_mm,
                 .overruns = overruns
             };

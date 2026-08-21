@@ -49,13 +49,11 @@ struct ControlSnapshot {
     float angle;        // the estimate actually closing the loop
     float rate;
     float kf_angle;     // both estimators, logged every tick regardless of
-    float comp_angle;   // which one is selected, so they can be compared
     float battery_voltage;
     float turning_duty;
     float effort_duty;
     float target_angle;
     float target_speed;
-    float ab_diff_drift;
     float motor_a_duty;
     float motor_b_duty;
     bool motors_enabled;

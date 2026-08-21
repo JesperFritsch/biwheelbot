@@ -59,7 +59,7 @@ BLEService telemetryService("19b10006-e8f2-537e-4f6c-d104768a1214");
 // wire format carries no field identifiers, only the schema does.
 BLECharacteristic telemetryChar("19b10007-e8f2-537e-4f6c-d104768a1214",
                                 BLERead | BLENotify, TELEM_FIELDS * sizeof(float));
-BLEDescriptor telemetryDesc("2901", "telem:ang,rate,kfa,cmp,tpos,pos,tang,tspd,eff,spd,d_a,d_b,t_d,bat,en,ovr");
+BLEDescriptor telemetryDesc("2901", "telem:ang,rate,kfa,tpos,pos,tang,tspd,eff,spd,d_a,d_b,t_d,bat,en,ovr");
 
 static ComHooks com_hooks = {};
 
